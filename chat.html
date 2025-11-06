@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>혼밥러 · 채팅</title>
+    <link rel="stylesheet" href="style.css" />
+    <style>
+        .chat-wrap {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            max-height: 70vh;
+            overflow: auto;
+            padding: 8px;
+            background: #0e1322;
+            border-radius: 12px;
+            border: 1px solid #22283a
+        }
+
+        .msg {
+            padding: 10px 12px;
+            border-radius: 12px;
+            max-width: 75%
+        }
+
+        .me {
+            align-self: flex-end;
+            background: #1b2438
+        }
+
+        .other {
+            align-self: flex-start;
+            background: #121a2b
+        }
+
+        .system {
+            align-self: center;
+            background: transparent;
+            color: #9aa0a6;
+            font-size: 12px;
+            padding: 0;
+            max-width: 100%
+        }
+
+        .meta {
+            font-size: 11px;
+            color: #9aa0a6;
+            margin-top: 4px
+        }
+
+        .send-row {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="topbar">
+            <div class="header" style="margin:0"><div class="logo">🍚</div><h1 class="title">채팅방</h1></div>
+            <div class="row" style="gap:8px">
+                <button id="backBtn" class="link-btn">뒤로가기</button>
+                <button id="exitBtn" class="link-btn" style="border-color:#ef4444;color:#ef4444">완전 나가기</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <div id="chat" class="chat-wrap"></div>
+            <div class="send-row">
+                <input id="text" type="text" placeholder="메시지를 입력하세요" />
+                <button id="send" class="btn" style="width:auto;min-width:100px">전송</button>
+            </div>
+            <p id="msg" class="status"></p>
+        </div>
+    </div>
+
+    <!-- 순서 고정: config → firebase (한 번만 로드), 캐시 무력화 위해 v 올림 -->
+    <script src="config.js?v=27"></script>
+    <script type="module" src="firebase.js?v=29"></script>
+
+    <script type="module">
+        const $ = (s) => document.querySelector(s);
+        const chat = $("#chat"), text = $("#text"), msg = $("#msg");
+        const getParam = (name) => { const u = new URL(location.href); return u.searchParams.get(name); };
+        const roomId = getParam("room");
+
+        try {
+            await window.fb.requireAuth();
+            if (!roomId) throw new Error("room 파라미터가 없습니다.");
+            await window.fb.assertRoomMember(roomId);
+        } catch (e) {
+            msg.className = "status err"; msg.textContent = "입장 실패: " + e.message;
+            setTimeout(() => location.href = "match.html", 800);
+        }
+
+        const esc = (s) => (s || "").replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[m]));
+        const render = (arr) => {
+            chat.innerHTML = "";
+            const me = window.fb.auth.currentUser?.uid;
+            arr.forEach(m => {
+                if (m.system) {                    // ← 시스템 메시지 가운데 표시
+                    const sys = document.createElement("div");
+                    sys.className = "msg system";
+                    sys.textContent = m.text || "";
+                    chat.appendChild(sys);
+                    return;
+                }
+                const div = document.createElement("div");
+                div.className = "msg " + (m.uid === me ? "me" : "other");
+                const who = m.display || (m.email ? m.email.split("@")[0] : "익명");
+                div.innerHTML = `<div>${esc(m.text || "")}</div><div class="meta">${esc(who)}</div>`;
+                chat.appendChild(div);
+            });
+            chat.scrollTop = chat.scrollHeight;
+        };
+        const unsub = window.fb.onMessages(roomId, render);
+
+        $("#send").addEventListener("click", async () => {
+            try { const t = text.value; text.value = ""; await window.fb.sendMessage(roomId, t); }
+            catch (e) { msg.className = "status err"; msg.textContent = "전송 실패: " + (e.message || e); }
+        });
+        text.addEventListener("keydown", (e) => { if (e.key === "Enter") $("#send").click(); });
+
+        $("#backBtn").addEventListener("click", () => {
+            try { localStorage.setItem("lastRoomId", roomId); } catch { }
+            location.href = "match.html";
+        });
+        $("#exitBtn").addEventListener("click", async () => {
+            try { $("#exitBtn").disabled = true; await window.fb.leaveRoom(roomId); localStorage.removeItem("lastRoomId"); location.href = "match.html"; }
+            catch (e) { msg.className = "status err"; msg.textContent = "나가기 실패: " + (e.message || e); }
+            finally { $("#exitBtn").disabled = false; }
+        });
+
+        window.addEventListener("beforeunload", () => { try { unsub && unsub(); } catch { } });
+    </script>
+</body>
+</html>
