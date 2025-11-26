@@ -85,7 +85,13 @@
     </style>
 </head>
 <body>
-
+    <script>
+        // GitHub Pages 도메인에서 접속했다면 → 로그인 페이지로 바로 이동
+        if (location.hostname.endsWith(".github.io")) {
+            // 뒤로가기 눌렀을 때 다시 index로 안 튕기도록 replace 사용
+            location.replace("login.html");
+        }
+    </script>
     <button id="logoutFab" class="btn outline" style="position:fixed; right:16px; top:14px; z-index:1000; padding:6px 12px; font-size:14px;">
         로그아웃
     </button>
