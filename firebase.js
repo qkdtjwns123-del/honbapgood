@@ -1,10 +1,9 @@
-// firebase.js v36 — 댓글 + 매칭 + 나가기 알림 + 패널티/이용제한(거절자만) + 좋아요(게시글/댓글) + 매칭 스코어 + 초기화
+// firebase.js — 댓글 + 매칭 + 나가기 알림 + 패널티/이용제한(거절자만) + 좋아요(게시글/댓글) + 매칭 스코어
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.1/firebase-app.js";
 import {
     getAuth, onAuthStateChanged, signInAnonymously, signOut,
     signInWithEmailAndPassword, createUserWithEmailAndPassword,
-    sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink, updatePassword,
-    fetchSignInMethodsForEmail
+    sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink, updatePassword
 } from "https://www.gstatic.com/firebasejs/10.13.1/firebase-auth.js";
 import {
     getFirestore, doc, getDoc, setDoc, updateDoc, addDoc, deleteDoc,
@@ -44,17 +43,14 @@ const my = {
         return auth?.currentUser?.uid || null;
     },
 
-    // 이메일 로그인된 사용자만 통과 (익명 로그인 X)
     async requireAuth() {
-        if (auth.currentUser && auth.currentUser.email) return auth.currentUser;
+        if (auth.currentUser) return auth.currentUser;
 
-        const user = await new Promise(res => {
+        // 1. 잠깐 기다려서 이미 로그인된 유저가 있는지 확인
+        const waited = await new Promise(res => {
             let done = false;
             const t = setTimeout(() => {
-                if (!done) {
-                    done = true;
-                    res(null);
-                }
+                if (!done) { done = true; res(null); }
             }, 1500);
 
             const un = onAuthStateChanged(auth, u => {
@@ -67,9 +63,15 @@ const my = {
             });
         });
 
-        if (user && user.email) return user;
+        if (waited) return waited;
 
-        throw new Error("로그인이 필요합니다.");
+        // 2. 없으면 익명 로그인
+        await signInAnonymously(auth);
+        return new Promise(res => {
+            const un = onAuthStateChanged(auth, u => {
+                if (u) { un(); res(u); }
+            });
+        });
     },
 
     async logout() {
@@ -82,36 +84,8 @@ const my = {
         return snap.exists() ? snap.data() : null;
     },
 
-    // ⭐ 닉네임 중복 체크 + 프로필 저장
     async saveProfile(p) {
         await my.requireAuth();
-        const u = auth.currentUser;
-        const email = (u?.email || "").toLowerCase() || null;
-
-        const nicknameRaw = (p.nickname ?? p.nick ?? "").trim();
-        const nickname = nicknameRaw || null;
-
-        // 닉네임 중복 검사: 실제 이메일이 설정된 프로필만 “사용 중”으로 취급
-        if (nickname) {
-            const qy = query(
-                collection(db, "profiles"),
-                where("nickname", "==", nickname),
-                limit(10)
-            );
-            const ss = await getDocs(qy);
-
-            for (const docSnap of ss.docs) {
-                const otherId = docSnap.id;
-                if (otherId === my.uid) continue; // 내 문서
-
-                const d = docSnap.data() || {};
-                const otherEmail = (d.email || "").toLowerCase();
-
-                if (otherEmail) {
-                    throw new Error("이미 사용 중인 닉네임입니다.");
-                }
-            }
-        }
 
         const payload = {
             year: p.year ?? null,
@@ -119,14 +93,10 @@ const my = {
             gender: p.gender ?? null,
             major: p.major ?? null,
             mbti: p.mbti ?? null,
-
-            nickname,
+            nickname: (p.nickname ?? p.nick ?? "").trim() || null,
             content: (p.content ?? p.consume ?? "").trim() || null,
             freeText: (p.freeText ?? "").trim(),
             isBot: !!p.isBot,
-
-            // 이 프로필이 실제 어떤 이메일 계정인지
-            email,
 
             // 패널티/이용 제한
             penaltyScore: p.penaltyScore ?? 0,
@@ -135,7 +105,7 @@ const my = {
             // 매칭 온도 (있던 값 유지)
             honbapTemp: p.honbapTemp ?? 50,
 
-            // matchCount / matchStars 는 addMatchSuccess, resetMatchScore 에서만
+            // matchCount / matchStars 는 addMatchSuccess 에서만 조정
             updatedAt: serverTimestamp(),
         };
 
@@ -148,7 +118,6 @@ async function loginWithEmailPassword(email, pw) {
     const cred = await signInWithEmailAndPassword(auth, email, pw);
     return cred.user;
 }
-
 async function signUpWithEmailPassword(email, pw) {
     const cred = await createUserWithEmailAndPassword(auth, email, pw);
     return cred.user;
@@ -161,21 +130,31 @@ const _assertKwEmail = (e) => {
     }
 };
 
-const _actionCodeSettings = () => ({
-    url: `${(typeof window !== "undefined" && location?.origin) || "http://localhost"}/signup.html`,
-    handleCodeInApp: true
-});
+// 🔴 여기 전체가 "1번"에서 말한 부분 (깃허브 / 로컬 모두 정상 동작하게 수정)
+const _actionCodeSettings = () => {
+    // 브라우저가 아닌 환경일 때 대비
+    if (typeof window === "undefined") {
+        return {
+            url: "http://localhost/signup.html",
+            handleCodeInApp: true
+        };
+    }
+
+    // 현재 페이지 기준으로 signup.html의 '정확한 전체 URL'을 만든다.
+    // 예)
+    //   로컬:   http://127.0.0.1:5500/signup.html
+    //   깃허브: https://아이디.github.io/레포이름/signup.html
+    const url = new URL("signup.html", window.location.href).href;
+
+    return {
+        url,
+        handleCodeInApp: true
+    };
+};
 
 async function sendEmailLink(email) {
     const e = (email || "").trim();
     _assertKwEmail(e);
-
-    // 이미 가입된 이메일인지 확인
-    const methods = await fetchSignInMethodsForEmail(auth, e);
-    if (methods && methods.length > 0) {
-        throw new Error("이미 가입된 메일입니다.");
-    }
-
     await sendSignInLinkToEmail(auth, e, _actionCodeSettings());
     try { localStorage.setItem("signup_email", e); } catch { }
     return true;
@@ -462,18 +441,15 @@ async function addMatchSuccess() {
     return result;
 }
 
-// ⭐ 매칭 스코어 초기화 (관리자 UI에서 사용)
+// 관리자용 매칭 스코어 초기화 (프로필 페이지에서 사용)
 async function resetMatchScore() {
     await my.requireAuth();
     const ref = doc(db, "profiles", my.uid);
-
     await setDoc(ref, {
         matchCount: 0,
         matchStars: 0,
         updatedAt: serverTimestamp()
     }, { merge: true });
-
-    return { matchCount: 0, matchStars: 0 };
 }
 
 // ────────────────────── 매칭 / 방 생성 ──────────────────────
@@ -568,6 +544,7 @@ async function createRoomAndInvite(myDocId, oppDocId, oppUid) {
         members: Array.from(new Set([my.uid, oppUid])).filter(Boolean),
         createdAt: serverTimestamp(),
 
+        // 수락 단계: 아직 아무도 투표 안 한 상태
         phase: "pendingAccept",
         acceptVoted: [],
         acceptYes: [],
@@ -604,16 +581,19 @@ async function myAcceptOrDecline(roomId, accept) {
         if (!s.exists()) throw new Error("room not found");
         const r = s.data();
 
+        // 이미 결론 난 방이면 무시
         if (r.phase !== "pendingAccept") return;
 
         const voted = new Set(r.acceptVoted || []);
         const yesSet = new Set(r.acceptYes || []);
         const me = my.uid;
 
+        // 내 투표 기록
         voted.add(me);
         if (accept) {
             yesSet.add(me);
         } else {
+            // 내가 거절 -> 즉시 전체 실패
             tx.update(ref, {
                 phase: "declined",
                 declinedBy: me,
@@ -636,8 +616,10 @@ async function myAcceptOrDecline(roomId, accept) {
 
         if (everyoneVoted) {
             if (everyoneYes) {
+                // 양쪽 모두 예 → 수락 완료
                 patch.phase = "accepted";
             } else {
+                // 누군가는 거절 → 실패
                 patch.phase = "declined";
                 if (!r.declinedBy) patch.declinedBy = me;
             }
@@ -647,6 +629,7 @@ async function myAcceptOrDecline(roomId, accept) {
     });
 }
 
+// 양쪽의 최종 결정 기다리기
 async function waitInviteDecision(roomId, timeoutSec = 30) {
     const ref = doc(db, "rooms", roomId);
 
@@ -876,13 +859,14 @@ const api = {
     // 매칭 시작
     startMatching: async (options) => {
         await my.requireAuth();
-        await _checkBanOrThrow();
+        await _checkBanOrThrow();  // 이용 제한 중이면 여기서 막힘
 
         await leaveQueueByUid(my.uid);
         const myDocId = await enterQueue(options);
 
         const found = await findOpponent(myDocId);
         if (!found) {
+            // 상대를 바로 못 찾으면, 내 큐 문서가 matched 상태가 될 때까지 기다림
             const myRef = doc(db, "matchQueue", myDocId);
             const room = await new Promise((resolve, reject) => {
                 const t = setTimeout(() => {
@@ -910,12 +894,12 @@ const api = {
     },
 
     // 수락/거절
-    readyToAccept: waitInviteDecision,
+    readyToAccept: waitInviteDecision,      // {accepted, declinedBy}
     acceptMatch: (roomId) => myAcceptOrDecline(roomId, true),
     declineMatch: (roomId) => myAcceptOrDecline(roomId, false),
 
     // (2단계용, 현재 UI에서는 안 쓰지만 유지)
-    readyToChat: waitStartDecision,
+    readyToChat: waitStartDecision,        // {go, declinedBy}
     startYes: (roomId) => myStartYesOrNo(roomId, true),
     startNo: (roomId) => myStartYesOrNo(roomId, false),
 
@@ -952,7 +936,7 @@ const api = {
 
     isAdminEmail,
     addMatchSuccess,
-    resetMatchScore,   // ⭐ 매칭 스코어 초기화 API 노출
+    resetMatchScore,
 };
 
 window.fb = api;
