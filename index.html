@@ -88,7 +88,6 @@
     <script>
         // GitHub Pages 도메인에서 접속했다면 → 로그인 페이지로 바로 이동
         if (location.hostname.endsWith(".github.io")) {
-            // 뒤로가기 눌렀을 때 다시 index로 안 튕기도록 replace 사용
             location.replace("login.html");
         }
     </script>
@@ -118,7 +117,6 @@
                 <button id="quickPostBtn" class="btn" style="width:auto;min-width:120px">등록</button>
             </div>
 
-            <!-- ✅ 커뮤니티와 동일: 왼쪽 정렬 + 가로 라벨 '익명' -->
             <label class="anon-wrap"><input id="quickAnon" type="checkbox" /><span class="muted-sm">익명</span></label>
 
             <p id="quickMsg" class="status"></p>
@@ -147,16 +145,30 @@
         const feed = $("#feed"), quickTitle = $("#quickTitle"), quickBody = $("#quickBody"),
             quickBtn = $("#quickPostBtn"), quickMsg = $("#quickMsg"), profileBox = $("#profileBox"),
             quickAnon = $("#quickAnon");
+
+        // 로그아웃 버튼
         const logoutFab = document.getElementById("logoutFab");
         logoutFab?.addEventListener("click", async () => {
             try { if (window.fbReady) await window.fbReady; await window.fb.logout(); } catch { } finally { location.href = "login.html"; }
         });
 
         if (window.fbReady) await window.fbReady;
-        try { await window.fb.requireAuth(); } catch (e) { location.href = "signup.html"; throw e; }
 
-        const cu = window.fb.auth.currentUser;
-        const MY_EMAIL = (cu?.email || "").toLowerCase();
+        // 🔒 [수정됨] 엄격한 로그인 체크 (즉시 확인)
+        // requireAuth() 대신 authStateReady()를 사용하여 익명 자동 로그인 시도(3초 지연)를 차단합니다.
+        const auth = window.fb.auth;
+        await auth.authStateReady(); // 현재 로그인 상태가 로드될 때까지 대기
+
+        const user = auth.currentUser;
+
+        // 비로그인 상태이거나 익명 계정이면 즉시 로그인 페이지로 이동
+        if (!user || user.isAnonymous) {
+            alert("로그인이 필요합니다.");
+            location.href = "login.html";
+            throw new Error("Login required"); // 이후 스크립트 실행 중단
+        }
+
+        const MY_EMAIL = (user.email || "").toLowerCase();
         const IS_ADMIN = window.fb.isAdminEmail?.(MY_EMAIL) === true;
 
         quickBtn.addEventListener("click", async () => {
@@ -186,7 +198,7 @@
             }[m]));
         }
 
-        // 🔗 URL을 자동으로 하이퍼링크로 바꿔주는 함수 (이미 esc된 문자열 대상)
+        // 🔗 URL을 자동으로 하이퍼링크로 바꿔주는 함수
         function linkify(html) {
             return (html || "").replace(
                 /(https?:\/\/[^\s<]+)/g,
@@ -206,17 +218,16 @@
                 const previewHtml = linkify(esc(bodyFull.slice(0, 100))) + (bodyFull.length > 100 ? "…" : "");
 
                 card.innerHTML = `
-                                <div class="post-title">${esc(p.title)}</div>
-                                <div class="post-meta">
-                                  <span>${esc(display)}</span><span>·</span>
-                                  <span>${p.createdAt?.toDate ? p.createdAt.toDate().toLocaleString() : ""}</span>
-                                  <span>·</span><span>좋아요 <b class="likecnt">0</b></span>
-                                </div>
-                                <div class="muted-sm post-preview" style="margin-top:6px"></div>
-                                <div class="nav" style="margin-top:10px"><a class="link-btn" href="community.html">댓글/상세 보기</a></div>
-                            `;
+                                        <div class="post-title">${esc(p.title)}</div>
+                                        <div class="post-meta">
+                                          <span>${esc(display)}</span><span>·</span>
+                                          <span>${p.createdAt?.toDate ? p.createdAt.toDate().toLocaleString() : ""}</span>
+                                          <span>·</span><span>좋아요 <b class="likecnt">0</b></span>
+                                        </div>
+                                        <div class="muted-sm post-preview" style="margin-top:6px"></div>
+                                        <div class="nav" style="margin-top:10px"><a class="link-btn" href="community.html">댓글/상세 보기</a></div>
+                                    `;
 
-                // 미리보기 영역에 링크 포함된 HTML 주입
                 const previewEl = card.querySelector(".post-preview");
                 if (previewEl) previewEl.innerHTML = previewHtml;
 
