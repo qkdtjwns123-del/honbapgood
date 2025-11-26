@@ -3,7 +3,8 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.1/fireba
 import {
     getAuth, onAuthStateChanged, signInAnonymously, signOut,
     signInWithEmailAndPassword, createUserWithEmailAndPassword,
-    sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink, updatePassword
+    sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink,
+    updatePassword, fetchSignInMethodsForEmail    // ✅ 추가
 } from "https://www.gstatic.com/firebasejs/10.13.1/firebase-auth.js";
 import {
     getFirestore, doc, getDoc, setDoc, updateDoc, addDoc, deleteDoc,
@@ -86,8 +87,10 @@ const my = {
 
     async saveProfile(p) {
         await my.requireAuth();
+        const u = auth.currentUser;
 
         const payload = {
+            email: u?.email ?? null,
             year: p.year ?? null,
             age: p.age ?? null,
             gender: p.gender ?? null,
@@ -108,6 +111,14 @@ const my = {
             // matchCount / matchStars 는 addMatchSuccess 에서만 조정
             updatedAt: serverTimestamp(),
         };
+
+        // ✅ 닉네임 최종 중복 체크 (프론트에서 한 번 더 확인하지만, 여기서도 방어)
+        if (payload.nickname) {
+            const ok = await checkNicknameAvailable(payload.nickname);
+            if (!ok) {
+                throw new Error("이미 사용 중인 닉네임입니다.");
+            }
+        }
 
         await setDoc(doc(db, "profiles", my.uid), payload, { merge: true });
     }
@@ -130,31 +141,42 @@ const _assertKwEmail = (e) => {
     }
 };
 
-// 🔴 여기 전체가 "1번"에서 말한 부분 (깃허브 / 로컬 모두 정상 동작하게 수정)
+// ✅ 깃허브 / 로컬 모두에서 signup.html로 정확히 보내기
 const _actionCodeSettings = () => {
-    // 브라우저가 아닌 환경일 때 대비
     if (typeof window === "undefined") {
         return {
             url: "http://localhost/signup.html",
             handleCodeInApp: true
         };
     }
-
-    // 현재 페이지 기준으로 signup.html의 '정확한 전체 URL'을 만든다.
-    // 예)
-    //   로컬:   http://127.0.0.1:5500/signup.html
-    //   깃허브: https://아이디.github.io/레포이름/signup.html
     const url = new URL("signup.html", window.location.href).href;
-
-    return {
-        url,
-        handleCodeInApp: true
-    };
+    return { url, handleCodeInApp: true };
 };
 
 async function sendEmailLink(email) {
     const e = (email || "").trim();
     _assertKwEmail(e);
+
+    // ✅ 1. Auth 중복 체크 (이메일 열거 보호 켜져 있으면 빈 배열 반환됨)
+    let methods = [];
+    try {
+        methods = await fetchSignInMethodsForEmail(auth, e);
+    } catch (err) {
+        console.warn("Auth check failed:", err);
+    }
+    if (methods && methods.length > 0) {
+        throw new Error("이미 가입된 메일입니다.");
+    }
+
+    // ✅ 2. Firestore 프로필 중복 체크 (이메일 열거 보호 우회)
+    // DB 조회를 위해 익명 인증 상태라도 확보
+    await my.requireAuth();
+    const q = query(collection(db, "profiles"), where("email", "==", e), limit(1));
+    const ss = await getDocs(q);
+    if (!ss.empty) {
+        throw new Error("이미 가입된 메일입니다.");
+    }
+
     await sendSignInLinkToEmail(auth, e, _actionCodeSettings());
     try { localStorage.setItem("signup_email", e); } catch { }
     return true;
@@ -179,6 +201,26 @@ async function setPasswordForCurrentUser(pw) {
     }
     await updatePassword(auth.currentUser, pw);
     return true;
+}
+
+// ────────────────────── 닉네임 중복 체크 ──────────────────────
+async function checkNicknameAvailable(nickname) {
+    await my.requireAuth();
+    const nick = (nickname || "").trim();
+    if (!nick) return true; // 빈 닉네임은 그냥 허용
+
+    const qy = query(
+        collection(db, "profiles"),
+        where("nickname", "==", nick),
+        limit(5)
+    );
+    const ss = await getDocs(qy);
+    if (ss.empty) return true;
+
+    const me = my.uid;
+    // 나 말고 다른 사람이 이 닉네임을 쓰고 있으면 false
+    const someoneElse = ss.docs.some(d => d.id !== me);
+    return !someoneElse;
 }
 
 // ────────────────────── 커뮤니티: 게시글/댓글/좋아요 ──────────────────────
@@ -441,7 +483,7 @@ async function addMatchSuccess() {
     return result;
 }
 
-// 관리자용 매칭 스코어 초기화 (프로필 페이지에서 사용)
+// 관리자용 매칭 스코어 초기화
 async function resetMatchScore() {
     await my.requireAuth();
     const ref = doc(db, "profiles", my.uid);
@@ -842,6 +884,7 @@ const api = {
     setPasswordForCurrentUser,
     loadProfile: my.nowProfile,
     saveProfile: my.saveProfile,
+    checkNicknameAvailable,        // ✅ 닉네임 중복 체크 API
 
     // 커뮤니티
     createPost,
