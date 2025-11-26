@@ -1,12 +1,10 @@
-<!-- filename: signup.html -->
 <!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>혼밥러 · 회원가입</title>
-    <!-- 로그인 페이지와 동일한 스타일 버전을 사용 -->
-    <link rel="stylesheet" href="style.css?v=17" />
+    <title>회원가입 · 이메일 인증</title>
+    <link rel="stylesheet" href="style.css" />
 </head>
 <body>
     <div class="container">
@@ -16,21 +14,34 @@
         </div>
 
         <div class="card">
-            <p class="muted">광운대 이메일(<b>@kw.ac.kr</b>)만 허용됩니다.</p>
+            <p class="muted">광운대 이메일(@kw.ac.kr)만 허용</p>
 
-            <label>학교 이메일</label>
-            <input
-                id="signupEmail"
-                type="email"
-                placeholder="example@kw.ac.kr"
-                autocomplete="email"
-            />
+            <!-- 1단계: 이메일 입력/전송 -->
+            <section id="stepEmail">
+                <label>학교 이메일</label>
+                <div class="row">
+                    <input id="email" type="email" placeholder="example@kw.ac.kr" autocomplete="email" />
+                    <button id="sendLinkBtn" class="btn" style="width:auto;min-width:160px">인증 메일 보내기</button>
+                </div>
+            </section>
 
-            <button id="sendEmailBtn" class="btn" style="margin-top:12px">
-                인증 메일 보내기
-            </button>
+            <!-- 2단계: 링크 소비 후 비밀번호 설정 -->
+            <section id="stepPassword" style="display:none">
+                <p id="verifiedEmail" class="muted"></p>
 
-            <p id="msg" class="status" style="margin-top:8px;"></p>
+                <label>새 비밀번호(8자 이상)</label>
+                <input id="newPassword" type="password" placeholder="********" />
+
+                <label>새 비밀번호 확인</label>
+                <input id="confirmPassword" type="password" placeholder="********" />
+
+                <button id="setPassBtn" class="btn">비밀번호 설정</button>
+            </section>
+
+            <!-- 완료 후 이동 -->
+            <a id="goLogin" class="btn secondary" href="login.html" style="display:none">로그인 하러 가기</a>
+
+            <p id="msg" class="status"></p>
 
             <div class="hr"></div>
             <div class="nav">
@@ -40,60 +51,73 @@
         </div>
     </div>
 
-    <!-- 순서 중요: config → firebase.js(모듈) → 이 페이지용 스크립트(모듈) -->
-    <script src="config.js?v=26"></script>
-    <script type="module" src="./firebase.js?v=35"></script>
+    <script type="module" src="./firebase.js?v=22"></script>
 
     <script type="module">
         const $ = (s) => document.querySelector(s);
+        const msg = $("#msg");
+        const stepEmail = $("#stepEmail");
+        const stepPassword = $("#stepPassword");
+        const verifiedEmail = $("#verifiedEmail");
+        const newPw = $("#newPassword");
+        const confirmPw = $("#confirmPassword");
+        const goLogin = $("#goLogin");
 
-        const emailInput = $("#signupEmail");
-        const sendBtn    = $("#sendEmailBtn");
-        const msg        = $("#msg");
+        const clearInvalid = (el) => el && el.classList.remove('invalid');
+        const markInvalid = (el) => el && el.classList.add('invalid');
+        [newPw, confirmPw].forEach(el => el?.addEventListener('input', () => clearInvalid(el)));
 
-        // firebase.js 가 window.fb / window.fbReady 를 세팅할 때까지 대기
-        async function waitFb() {
-            if (window.fbReady) {
-                await window.fbReady;
-            } else {
-                // 혹시 fbReady가 없더라도 fb 객체와 sendEmailLink 가 준비될 때까지 폴링
-                while (!(window.fb && window.fb.sendEmailLink)) {
-                    await new Promise(r => setTimeout(r, 30));
-                }
-            }
-        }
-
-        // 페이지 로드되면 한 번만 fb 준비를 기다린다
-        await waitFb();
-
-        // 인증 메일 보내기 버튼
-        sendBtn?.addEventListener("click", async () => {
-            msg.className = "status";
-            msg.textContent = "";
-
+        // 링크 소비 → 비번 설정 단계로
+        (async () => {
             try {
-                const email = (emailInput.value || "").trim();
-                if (!email) {
-                    msg.className = "status err";
-                    msg.textContent = "이메일을 입력하세요.";
-                    return;
+                const { consumed, email } = await window.fb.handleEmailLinkIfPresent();
+                if (consumed) {
+                    stepEmail.style.display = "none";
+                    stepPassword.style.display = "block";
+                    verifiedEmail.textContent = `인증 완료: ${email}`;
+                    msg.className = "status ok";
+                    msg.textContent = "인증이 완료되었습니다. 비밀번호를 설정하세요.";
                 }
-
-                sendBtn.disabled = true;
-
-                // firebase.js 에서 노출한 래퍼 사용
-                await window.fb.sendEmailLink(email);
-
-                msg.className = "status ok";
-                msg.textContent = "인증 메일을 전송했습니다. 메일함을 확인하세요.";
             } catch (e) {
-                // firebase.js 쪽에서 던진 에러 메시지를 그대로 보여줌
                 msg.className = "status err";
-                msg.textContent = "전송 실패: " + (e?.message || e);
-            } finally {
-                sendBtn.disabled = false;
+                msg.textContent = "인증 처리 오류: " + e.message;
+            }
+        })();
+
+        // 인증 메일 보내기
+        $("#sendLinkBtn")?.addEventListener("click", async () => {
+            try {
+                await window.fb.sendEmailLink($("#email").value.trim());
+                msg.className = "status ok";
+                msg.textContent = "인증 링크를 전송했습니다. 메일함을 확인하세요.";
+            } catch (e) {
+                msg.className = "status err";
+                msg.textContent = "전송 실패: " + e.message;
+            }
+        });
+
+        // 비밀번호 설정 (길이/일치 검사)
+        $("#setPassBtn")?.addEventListener("click", async () => {
+            try {
+                const pw = newPw.value.trim();
+                const pw2 = confirmPw.value.trim();
+                if (pw.length < 8) { markInvalid(newPw); msg.className = "status err"; msg.textContent = "비밀번호는 8자 이상이어야 합니다."; return; }
+                if (pw !== pw2) { markInvalid(newPw); markInvalid(confirmPw); msg.className = "status err"; msg.textContent = "비밀번호가 서로 일치하지 않습니다."; return; }
+
+                await window.fb.setPasswordForCurrentUser(pw);
+                msg.className = "status ok";
+                msg.textContent = "비밀번호 설정 완료! 아래 버튼으로 로그인하세요.";
+                if (goLogin) goLogin.style.display = "block";
+            } catch (e) {
+                msg.className = "status err";
+                msg.textContent = "설정 실패: " + e.message;
             }
         });
     </script>
+    <!-- 1) config.js를 먼저 로드해서 window.firebaseConfig를 준비 -->
+    <script src="config.js?v=26"></script>
+    <!-- 2) firebase.js는 ES 모듈로 로드 (import 문 때문에 반드시 type="module") -->
+    <script type="module" src="firebase.js?v=26"></script>
+
 </body>
 </html>
