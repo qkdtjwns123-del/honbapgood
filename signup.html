@@ -16,7 +16,6 @@
         <div class="card">
             <p class="muted">광운대 이메일(@kw.ac.kr)만 허용</p>
 
-            <!-- 1단계: 이메일 입력/전송 -->
             <section id="stepEmail">
                 <label>학교 이메일</label>
                 <div class="row">
@@ -25,7 +24,6 @@
                 </div>
             </section>
 
-            <!-- 2단계: 링크 소비 후 비밀번호 설정 -->
             <section id="stepPassword" style="display:none">
                 <p id="verifiedEmail" class="muted"></p>
 
@@ -38,7 +36,6 @@
                 <button id="setPassBtn" class="btn">비밀번호 설정</button>
             </section>
 
-            <!-- 완료 후 이동 -->
             <a id="goLogin" class="btn secondary" href="login.html" style="display:none">로그인 하러 가기</a>
 
             <p id="msg" class="status"></p>
@@ -51,7 +48,8 @@
         </div>
     </div>
 
-    <script type="module" src="./firebase.js?v=22"></script>
+    <script src="config.js?v=26"></script>
+    <script type="module" src="firebase.js?v=26"></script>
 
     <script type="module">
         const $ = (s) => document.querySelector(s);
@@ -87,12 +85,21 @@
         // 인증 메일 보내기
         $("#sendLinkBtn")?.addEventListener("click", async () => {
             try {
-                await window.fb.sendEmailLink($("#email").value.trim());
+                msg.className = "status";
+                msg.textContent = "";
+                const email = $("#email").value.trim();
+                await window.fb.sendEmailLink(email);
                 msg.className = "status ok";
                 msg.textContent = "인증 링크를 전송했습니다. 메일함을 확인하세요.";
             } catch (e) {
+                const text = e?.message || String(e || "");
                 msg.className = "status err";
-                msg.textContent = "전송 실패: " + e.message;
+                // ✅ 중복 이메일 알림 처리
+                if (text.includes("이미 가입된 메일입니다") || text.includes("이미 가입된 계정이")) {
+                    msg.textContent = "이미 가입된 메일입니다.";
+                } else {
+                    msg.textContent = "전송 실패: " + text;
+                }
             }
         });
 
@@ -101,8 +108,19 @@
             try {
                 const pw = newPw.value.trim();
                 const pw2 = confirmPw.value.trim();
-                if (pw.length < 8) { markInvalid(newPw); msg.className = "status err"; msg.textContent = "비밀번호는 8자 이상이어야 합니다."; return; }
-                if (pw !== pw2) { markInvalid(newPw); markInvalid(confirmPw); msg.className = "status err"; msg.textContent = "비밀번호가 서로 일치하지 않습니다."; return; }
+                if (pw.length < 8) {
+                    markInvalid(newPw);
+                    msg.className = "status err";
+                    msg.textContent = "비밀번호는 8자 이상이어야 합니다.";
+                    return;
+                }
+                if (pw !== pw2) {
+                    markInvalid(newPw);
+                    markInvalid(confirmPw);
+                    msg.className = "status err";
+                    msg.textContent = "비밀번호가 서로 일치하지 않습니다.";
+                    return;
+                }
 
                 await window.fb.setPasswordForCurrentUser(pw);
                 msg.className = "status ok";
@@ -114,10 +132,5 @@
             }
         });
     </script>
-    <!-- 1) config.js를 먼저 로드해서 window.firebaseConfig를 준비 -->
-    <script src="config.js?v=26"></script>
-    <!-- 2) firebase.js는 ES 모듈로 로드 (import 문 때문에 반드시 type="module") -->
-    <script type="module" src="firebase.js?v=26"></script>
-
 </body>
 </html>
