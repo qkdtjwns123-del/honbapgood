@@ -79,9 +79,9 @@
             await auth.authStateReady();
             const u = auth.currentUser;
             
-            // 🔒 비로그인/익명 차단
+            // 🔒 비로그인/익명 차단 (대기 시간을 500ms로 늘림)
             if (!u || u.isAnonymous) {
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 500)); // 0.5초 대기
                 alert("로그인이 필요합니다.");
                 location.href = "login.html";
                 return;
@@ -111,7 +111,7 @@
 
         boot();
 
-        // [Helper UI Functions - keep outside to avoid clutter]
+        // [Helper UI Functions]
         const filterIds = ['yearSame', 'majorSame', 'ageSame', 'genderSame', 'freeOverlap', 'onlineOnly'];
         const setFiltersDisabled = (d) => {
             const box = $('filters');
@@ -153,7 +153,7 @@
             try {
                 const fb = await ensureFbReady();
                 fbInstance = fb;
-                const u = await fb.requireAuth(); // Just ensuring instance
+                const u = await fb.requireAuth();
                 myUid = u?.uid || null;
 
                 const opts = {
