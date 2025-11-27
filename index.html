@@ -69,7 +69,6 @@
             flex-wrap: wrap
         }
 
-        /* ✅ 커뮤니티와 동일한 익명 체크 스타일 */
         .anon-wrap {
             display: inline-flex;
             align-items: center;
@@ -86,7 +85,6 @@
 </head>
 <body>
     <script>
-        // GitHub Pages 도메인에서 접속했다면 → 로그인 페이지로 바로 이동
         if (location.hostname.endsWith(".github.io")) {
             location.replace("login.html");
         }
@@ -145,60 +143,76 @@
         const feed = $("#feed"), quickTitle = $("#quickTitle"), quickBody = $("#quickBody"),
             quickBtn = $("#quickPostBtn"), quickMsg = $("#quickMsg"), profileBox = $("#profileBox"),
             quickAnon = $("#quickAnon");
-
-        // 로그아웃 버튼
+        
         const logoutFab = document.getElementById("logoutFab");
         logoutFab?.addEventListener("click", async () => {
             try { if (window.fbReady) await window.fbReady; await window.fb.logout(); } catch { } finally { location.href = "login.html"; }
         });
 
-        if (window.fbReady) await window.fbReady;
+        // ✅ 메인 실행 함수
+        async function boot() {
+            if (window.fbReady) await window.fbReady;
+            
+            const auth = window.fb.auth;
+            await auth.authStateReady();
+            const user = auth.currentUser;
+            
+            // 🔒 비로그인/익명 차단 (화면이 보일 시간을 주기 위해 100ms 대기)
+            if (!user || user.isAnonymous) {
+                await new Promise(r => setTimeout(r, 100));
+                alert("로그인이 필요합니다.");
+                location.href = "login.html";
+                return; // 이후 로직 중단
+            }
 
-        // 🔒 [수정됨] 엄격한 로그인 체크 (즉시 확인)
-        // requireAuth() 대신 authStateReady()를 사용하여 익명 자동 로그인 시도(3초 지연)를 차단합니다.
-        const auth = window.fb.auth;
-        await auth.authStateReady(); // 현재 로그인 상태가 로드될 때까지 대기
+            // --- 로그인된 사용자만 실행되는 로직 ---
+            const MY_EMAIL = (user.email || "").toLowerCase();
+            const IS_ADMIN = window.fb.isAdminEmail?.(MY_EMAIL) === true;
 
-        const user = auth.currentUser;
+            quickBtn.addEventListener("click", async () => {
+                try {
+                    quickMsg.className = "status"; quickMsg.textContent = "";
+                    const title = (quickTitle.value || "").trim();
+                    const body = (quickBody.value || "").trim();
+                    const anonymous = !!quickAnon.checked;
+                    if (!title) { quickMsg.className = "status err"; quickMsg.textContent = "제목을 입력하세요."; return; }
+                    quickBtn.disabled = true;
+                    await window.fb.createPost({ title, body, anonymous });
+                    quickTitle.value = ""; quickBody.value = ""; quickAnon.checked = false;
+                    quickMsg.className = "status ok"; quickMsg.textContent = "등록 완료!";
+                    feed.innerHTML = ""; await loadFeed();
+                } catch (e) {
+                    quickMsg.className = "status err"; quickMsg.textContent = e?.message || e;
+                } finally { quickBtn.disabled = false; }
+            });
 
-        // 비로그인 상태이거나 익명 계정이면 즉시 로그인 페이지로 이동
-        if (!user || user.isAnonymous) {
-            alert("로그인이 필요합니다.");
-            location.href = "login.html";
-            throw new Error("Login required"); // 이후 스크립트 실행 중단
+            await loadFeed(IS_ADMIN, MY_EMAIL);
+            
+            // 프로필 요약 로드
+            try {
+                const data = await window.fb.loadProfile().catch(() => null);
+                const L = [];
+                if (data?.nickname) L.push(`닉네임: ${data.nickname}`);
+                if (data?.major) L.push(`학과: ${data.major}`);
+                if (data?.year != null) L.push(`학번: ${data.year}`);
+                if (data?.age != null) L.push(`나이: ${data.age}`);
+                if (data?.gender) L.push(`성별: ${data.gender}`);
+                if (data?.mbti) L.push(`MBTI: ${String(data.mbti).toUpperCase()}`);
+                if (data?.content) L.push(`콘텐츠: ${data.content}`);
+                profileBox.textContent = L.length ? L.join(" · ") : "아직 프로필 정보가 비어 있어요.";
+            } catch {
+                profileBox.textContent = "프로필을 불러오지 못했어요.";
+            }
         }
 
-        const MY_EMAIL = (user.email || "").toLowerCase();
-        const IS_ADMIN = window.fb.isAdminEmail?.(MY_EMAIL) === true;
-
-        quickBtn.addEventListener("click", async () => {
-            try {
-                quickMsg.className = "status"; quickMsg.textContent = "";
-                const title = (quickTitle.value || "").trim();
-                const body = (quickBody.value || "").trim();
-                const anonymous = !!quickAnon.checked;
-                if (!title) { quickMsg.className = "status err"; quickMsg.textContent = "제목을 입력하세요."; return; }
-                quickBtn.disabled = true;
-                await window.fb.createPost({ title, body, anonymous });
-                quickTitle.value = ""; quickBody.value = ""; quickAnon.checked = false;
-                quickMsg.className = "status ok"; quickMsg.textContent = "등록 완료!";
-                feed.innerHTML = ""; await loadFeed();
-            } catch (e) {
-                quickMsg.className = "status err"; quickMsg.textContent = e?.message || e;
-            } finally { quickBtn.disabled = false; }
-        });
+        boot();
 
         function esc(s) {
             return (s || "").replace(/[&<>"']/g, m => ({
-                "&": "&amp;",
-                "<": "&lt;",
-                ">": "&gt;",
-                "\"": "&quot;",
-                "'": "&#39;"
+                "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
             }[m]));
         }
 
-        // 🔗 URL을 자동으로 하이퍼링크로 바꿔주는 함수
         function linkify(html) {
             return (html || "").replace(
                 /(https?:\/\/[^\s<]+)/g,
@@ -206,7 +220,7 @@
             );
         }
 
-        async function loadFeed() {
+        async function loadFeed(IS_ADMIN, MY_EMAIL) {
             const items = await window.fb.listPosts({ take: 5 }) || [];
             feed.innerHTML = "";
             (Array.isArray(items) ? items : (items.items || [])).forEach(p => {
@@ -218,15 +232,15 @@
                 const previewHtml = linkify(esc(bodyFull.slice(0, 100))) + (bodyFull.length > 100 ? "…" : "");
 
                 card.innerHTML = `
-                                        <div class="post-title">${esc(p.title)}</div>
-                                        <div class="post-meta">
-                                          <span>${esc(display)}</span><span>·</span>
-                                          <span>${p.createdAt?.toDate ? p.createdAt.toDate().toLocaleString() : ""}</span>
-                                          <span>·</span><span>좋아요 <b class="likecnt">0</b></span>
-                                        </div>
-                                        <div class="muted-sm post-preview" style="margin-top:6px"></div>
-                                        <div class="nav" style="margin-top:10px"><a class="link-btn" href="community.html">댓글/상세 보기</a></div>
-                                    `;
+                                    <div class="post-title">${esc(p.title)}</div>
+                                    <div class="post-meta">
+                                      <span>${esc(display)}</span><span>·</span>
+                                      <span>${p.createdAt?.toDate ? p.createdAt.toDate().toLocaleString() : ""}</span>
+                                      <span>·</span><span>좋아요 <b class="likecnt">0</b></span>
+                                    </div>
+                                    <div class="muted-sm post-preview" style="margin-top:6px"></div>
+                                    <div class="nav" style="margin-top:10px"><a class="link-btn" href="community.html">댓글/상세 보기</a></div>
+                                `;
 
                 const previewEl = card.querySelector(".post-preview");
                 if (previewEl) previewEl.innerHTML = previewHtml;
@@ -258,7 +272,7 @@
                     delBtn.style.borderColor = "#ef4444"; delBtn.style.color = "#ef4444";
                     delBtn.addEventListener("click", async () => {
                         if (!confirm("정말 삭제할까요?")) return;
-                        try { await window.fb.deletePost(p.id); await loadFeed(); }
+                        try { await window.fb.deletePost(p.id); await loadFeed(IS_ADMIN, MY_EMAIL); }
                         catch (e) { alert("삭제 실패: " + (e.message || e)); }
                     });
                     nav.appendChild(delBtn);
@@ -277,23 +291,6 @@
                 div.textContent = "아직 글이 없어요. 첫 글을 남겨보세요!";
                 feed.appendChild(div);
             }
-        }
-        await loadFeed();
-
-        // 프로필 요약
-        try {
-            const data = await window.fb.loadProfile().catch(() => null);
-            const L = [];
-            if (data?.nickname) L.push(`닉네임: ${data.nickname}`);
-            if (data?.major) L.push(`학과: ${data.major}`);
-            if (data?.year != null) L.push(`학번: ${data.year}`);
-            if (data?.age != null) L.push(`나이: ${data.age}`);
-            if (data?.gender) L.push(`성별: ${data.gender}`);
-            if (data?.mbti) L.push(`MBTI: ${String(data.mbti).toUpperCase()}`);
-            if (data?.content) L.push(`콘텐츠: ${data.content}`);
-            profileBox.textContent = L.length ? L.join(" · ") : "아직 프로필 정보가 비어 있어요.";
-        } catch {
-            profileBox.textContent = "프로필을 불러오지 못했어요.";
         }
     </script>
 </body>
