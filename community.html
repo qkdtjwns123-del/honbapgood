@@ -42,6 +42,7 @@
             font-size: 12px
         }
 
+        /* ✅ 글쓰기 익명 체크: 왼쪽 붙이고 가로 유지 */
         .anon-wrap {
             display: inline-flex;
             align-items: center;
@@ -55,6 +56,7 @@
                 margin: 0
             }
 
+        /* ✅ 댓글 UI */
         .comment-wrap {
             margin-top: 10px;
             padding-top: 10px;
@@ -155,7 +157,7 @@
         const list = $("#list"), moreBtn = $("#moreBtn"), countTxt = $("#countTxt"), postBtn = $("#postBtn"),
             postMsg = $("#postMsg"), titleEl = $("#title"), bodyEl = $("#body"), anonEl = $("#anon");
 
-        //로그아웃 버튼 기능 연결
+        // ✅ 로그아웃 버튼 기능 연결
         const logoutFab = document.getElementById("logoutFab");
         logoutFab?.addEventListener("click", async () => {
             try { if (window.fbReady) await window.fbReady; await window.fb.logout(); } catch { } finally { location.href = "login.html"; }
@@ -169,14 +171,14 @@
             "'": "&#39;"
         }[m]));
 
-        //URL을 자동으로 링크로
+        // 🔗 URL을 자동으로 링크로
         const linkify = (html) =>
             (html || "").replace(
                 /(https?:\/\/[^\s<]+)/g,
                 '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
             );
 
-        //좋아요 버튼 색깔 토글용 공통 함수
+        // ✅ 좋아요 버튼 색깔 토글용 공통 함수
         function applyLikeVisual(btn, liked) {
             if (!btn) return;
             btn.style.borderColor = "#ef4444";
@@ -209,7 +211,7 @@
             return IS_ADMIN || byUid || byEmail;
         }
 
-        //댓글 렌더링 유틸
+        /* ===== 댓글 렌더링 유틸 ===== */
         function renderCommentItem(c, { postId, canManage, onDelete }) {
             const div = document.createElement("div");
             div.className = "comment-item";
@@ -351,7 +353,7 @@
                 }
             });
         }
-        //댓글 유틸 끝
+        /* ===== 댓글 유틸 끝 ===== */
 
         function renderPostCard(p) {
             const wrap = document.createElement("div");
@@ -453,6 +455,7 @@
             // 댓글 블록
             renderCommentsBlock(p, wrap);
 
+            // ✅ [수정됨] prepend 대신 appendChild 사용 (최신글이 이미 0번 인덱스이므로, 순서대로 뒤에 붙여야 함)
             list.appendChild(wrap);
         }
 
