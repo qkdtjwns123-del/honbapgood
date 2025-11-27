@@ -58,66 +58,63 @@
 
     <script type="module">
         const $ = (id) => document.getElementById(id);
+
         const say = (m, ok = true) => {
             const el = $('status');
             el.textContent = m || '';
             el.style.color = ok ? 'var(--text-muted,#9fb7d0)' : '#ff6b6b';
         };
 
-        let fbInstance = null;
-        let myUid = null;
-        let currentRoomId = null;
-        let phase = 'idle';
+        // 🔒 [수정됨] 엄격한 로그인 체크
+        // firebase.js가 로드된 후 실행되며, 비로그인 시 즉시 쫓아냅니다.
+        try {
+            if (window.fbReady) await window.fbReady;
+            else if (window.fb) await Promise.resolve();
+            else throw new Error("Firebase not ready");
+
+            const u = await window.fb.requireAuth();
+            if (!u || u.isAnonymous) {
+                alert("로그인이 필요합니다.");
+                location.href = "login.html";
+                throw new Error("Login required");
+            }
+        } catch (e) {
+            // 초기화 중 에러가 나거나 로그인이 안되어있으면 리다이렉트
+            if (e.message !== "Login required") console.error(e);
+        }
+
+        async function ensureFbReady(timeoutMs = 8000) {
+            if (window.fb) return window.fb;
+            return await window.fbReady;
+        }
+
+        // 마지막 채팅방 다시 열기 버튼
+        const lastRoomId = localStorage.getItem('lastRoomId');
+        if (lastRoomId) {
+            const b = $('reopenBtn');
+            b.style.display = 'inline-block';
+            b.addEventListener('click', () => {
+                location.href = `chat.html?room=${encodeURIComponent(lastRoomId)}`;
+            });
+        }
+
         let finding = false;
         let cancelRequested = false;
 
-        // ✅ 메인 실행 함수
-        async function boot() {
-            if (window.fbReady) await window.fbReady;
-            
-            const auth = window.fb.auth;
-            await auth.authStateReady();
-            const u = auth.currentUser;
-            
-            // 🔒 비로그인/익명 차단 (대기 시간을 500ms로 늘림)
-            if (!u || u.isAnonymous) {
-                await new Promise(r => setTimeout(r, 500)); // 0.5초 대기
-                alert("로그인이 필요합니다.");
-                location.href = "login.html";
-                return;
-            }
+        const filterIds = [
+            'yearSame', 'majorSame', 'ageSame',
+            'genderSame', 'freeOverlap', 'onlineOnly'
+        ];
 
-            // --- 로그인된 사용자만 실행 ---
-            // Reopen button logic
-            const lastRoomId = localStorage.getItem('lastRoomId');
-            if (lastRoomId) {
-                const b = $('reopenBtn');
-                b.style.display = 'inline-block';
-                b.addEventListener('click', () => {
-                    location.href = `chat.html?room=${encodeURIComponent(lastRoomId)}`;
-                });
-            }
-
-            $('startBtn').addEventListener('click', () => {
-                onStart().catch(e => {
-                    console.error(e);
-                    const msg = e?.message || String(e || '');
-                    if (msg.includes('패널티 5회 누적으로')) say(msg, false);
-                    else say('시작 실패: ' + msg, false);
-                });
-            });
-            $('leaveBtn').addEventListener('click', onLeave);
-        }
-
-        boot();
-
-        // [Helper UI Functions]
-        const filterIds = ['yearSame', 'majorSame', 'ageSame', 'genderSame', 'freeOverlap', 'onlineOnly'];
         const setFiltersDisabled = (d) => {
             const box = $('filters');
             box?.setAttribute('aria-disabled', d ? 'true' : 'false');
-            filterIds.forEach(id => { const el = $(id); if (el) el.disabled = d; });
+            filterIds.forEach(id => {
+                const el = $(id);
+                if (el) el.disabled = d;
+            });
         };
+
         const setFindingUI = (on) => {
             const s = $('startBtn');
             s.classList.toggle('loading', on);
@@ -129,21 +126,64 @@
         const acceptArea = $('acceptArea');
         const acceptYesBtn = $('acceptYesBtn');
         const acceptNoBtn = $('acceptNoBtn');
+
         const startArea = $('startArea');
         const startYesBtn = $('startYesBtn');
         const startNoBtn = $('startNoBtn');
 
-        const hideAllSteps = () => { acceptArea.style.display = 'none'; startArea.style.display = 'none'; };
-        const disableAcceptBtns = (d) => { acceptYesBtn.disabled = d; acceptNoBtn.disabled = d; };
+        const hideAllSteps = () => {
+            acceptArea.style.display = 'none';
+            startArea.style.display = 'none';
+        };
 
-        // [Async Logic]
-        async function ensureFbReady(timeoutMs = 8000) {
-            if (window.fb) return window.fb;
-            return await window.fbReady;
-        }
+        const disableAcceptBtns = (d) => {
+            acceptYesBtn.disabled = d;
+            acceptNoBtn.disabled = d;
+        };
+        const disableStartBtns = (d) => {
+            startYesBtn.disabled = d;
+            startNoBtn.disabled = d;
+        };
+
+        let fbInstance = null;
+        let myUid = null;
+        let currentRoomId = null;
+        let phase = 'idle';   // idle | queue | accept | start
+
+        $('startBtn').addEventListener('click', () => {
+            onStart().catch(e => {
+                console.error(e);
+                const msg = e?.message || String(e || '');
+                if (msg) {
+                    if (msg.includes('패널티 5회 누적으로')) {
+                        say(msg, false);
+                    } else {
+                        say('시작 실패: ' + msg, false);
+                    }
+                }
+            });
+        });
+        $('leaveBtn').addEventListener('click', onLeave);
+
+        window.addEventListener('beforeunload', async () => {
+            try {
+                const fb = await ensureFbReady(500);
+                await fb.cancelMatching();
+            } catch { }
+        });
+
+        document.addEventListener('visibilitychange', async () => {
+            if (document.visibilityState === 'hidden') {
+                try {
+                    const fb = await ensureFbReady(500);
+                    await fb.markLeaving();
+                } catch { }
+            }
+        });
 
         async function onStart() {
             if (finding) return;
+
             finding = true;
             cancelRequested = false;
             hideAllSteps();
@@ -153,6 +193,7 @@
             try {
                 const fb = await ensureFbReady();
                 fbInstance = fb;
+
                 const u = await fb.requireAuth();
                 myUid = u?.uid || null;
 
@@ -166,17 +207,24 @@
                 };
 
                 const { id: roomId } = await fb.startMatching(opts);
-                if (cancelRequested) { cleanup(true); return; }
+                if (cancelRequested) {
+                    cleanup(true);
+                    return;
+                }
 
                 currentRoomId = roomId;
                 phase = 'accept';
                 finding = false;
+
                 setupAcceptUI();
             } catch (e) {
                 console.error(e);
                 const msg = e?.message || String(e || '');
-                if (msg.includes('패널티 5회 누적으로')) say(msg, false);
-                else say('시작 실패: ' + msg, false);
+                if (msg.includes('패널티 5회 누적으로')) {
+                    say(msg, false);
+                } else {
+                    say('시작 실패: ' + msg, false);
+                }
                 cleanup(false, true);
             }
         }
@@ -187,6 +235,7 @@
             acceptArea.style.display = 'flex';
             disableAcceptBtns(false);
             say('매칭이 성사되었습니다. 아래 버튼으로 수락/거절을 선택해주세요.');
+
             acceptYesBtn.onclick = () => handleAccept(true);
             acceptNoBtn.onclick = () => handleAccept(false);
         }
@@ -195,10 +244,14 @@
             if (phase !== 'accept' || !fbInstance || !currentRoomId) return;
             const fb = fbInstance;
             const roomId = currentRoomId;
+
             try {
                 disableAcceptBtns(true);
-                if (yes) await fb.acceptMatch(roomId);
-                else await fb.declineMatch(roomId);
+                if (yes) {
+                    await fb.acceptMatch(roomId);
+                } else {
+                    await fb.declineMatch(roomId);
+                }
 
                 say('상대방의 수락 여부를 기다리는 중입니다…');
                 const { accepted, declinedBy } = await fb.readyToAccept(roomId, 30);
@@ -211,29 +264,49 @@
                             let msg = '거절하여 패널티가 1회 부과되었습니다.';
                             try {
                                 const prof = await fb.loadProfile?.().catch(() => null);
-                                const rawUntil = prof?.penaltyUntil;
+                                const rawUntil = prof?.penaltyUntil || null;
                                 const until = rawUntil?.toDate ? rawUntil.toDate() : rawUntil;
-                                if (until && until.getTime() > Date.now()) msg = '패널티 5회 누적으로 1시간 동안 이용이 제한됩니다.';
+                                if (until && until.getTime() > Date.now()) {
+                                    msg = '패널티 5회 누적으로 1시간 동안 이용이 제한됩니다.';
+                                }
                             } catch { }
                             say(msg, false);
-                        } catch { say('거절하여 패널티가 1회 부과되었습니다.', false); }
-                    } else { say('상대방이 거절하였습니다.', false); }
-                    phase = 'idle'; currentRoomId = null; setFindingUI(false); return;
+                        } catch {
+                            say('거절하여 패널티가 1회 부과되었습니다.', false);
+                        }
+                    } else {
+                        say('상대방이 거절하였습니다.', false);
+                    }
+                    phase = 'idle';
+                    currentRoomId = null;
+                    setFindingUI(false);
+                    return;
                 }
 
-                phase = 'idle'; setFindingUI(false);
+                phase = 'idle';
+                setFindingUI(false);
+
                 try {
                     const res = await fb.addMatchSuccess();
-                    if (res && res.rewarded) alert('축하합니다! 매칭 스코어 ★★★ 달성! 소정의 상품이 지급될 예정입니다. 🎉');
+                    if (res && res.rewarded) {
+                        alert('축하합니다! 매칭 스코어 ★★★ 달성! 소정의 상품이 지급될 예정입니다. 🎉');
+                    }
                 } catch { }
+
                 try { localStorage.setItem('lastRoomId', roomId); } catch { }
                 say('채팅방으로 이동합니다…');
                 await fb.gotoRoom(roomId);
+                return;
+
             } catch (e) {
                 console.error(e);
                 say('수락 단계에서 오류가 발생했습니다: ' + (e?.message || e), false);
-                phase = 'idle'; currentRoomId = null; setFindingUI(false);
-            } finally { disableAcceptBtns(false); }
+                phase = 'idle';
+                currentRoomId = null;
+                setFindingUI(false);
+            } finally {
+                disableAcceptBtns(false);
+            }
         }
 
         async function onLeave() {
@@ -243,6 +316,7 @@
             currentRoomId = null;
             hideAllSteps();
             setFindingUI(false);
+
             try {
                 const fb = fbInstance || await ensureFbReady();
                 await fb.cancelMatching();
@@ -254,13 +328,22 @@
         }
 
         function cleanup(alsoCancel = false, keepMessage = false) {
-            if (!cancelRequested && !keepMessage) say('');
-            finding = false; phase = 'idle'; hideAllSteps(); setFindingUI(false);
-            if (alsoCancel && fbInstance) { (async () => { try { await fbInstance.cancelMatching(); } catch { } })(); }
-        }
+            if (!cancelRequested && !keepMessage) {
+                say('');
+            }
+            finding = false;
+            phase = 'idle';
+            hideAllSteps();
+            setFindingUI(false);
 
-        window.addEventListener('beforeunload', async () => { try { const fb = await ensureFbReady(500); await fb.cancelMatching(); } catch { } });
-        document.addEventListener('visibilitychange', async () => { if (document.visibilityState === 'hidden') { try { const fb = await ensureFbReady(500); await fb.markLeaving(); } catch { } } });
+            if (alsoCancel && fbInstance) {
+                (async () => {
+                    try {
+                        await fbInstance.cancelMatching();
+                    } catch { }
+                })();
+            }
+        }
     </script>
 </body>
 </html>
