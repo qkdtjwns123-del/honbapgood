@@ -7,9 +7,7 @@
     <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-    <button id="logoutFab" class="btn outline">
-        로그아웃
-    </button>
+    <button id="logoutFab" class="btn outline">로그아웃</button>
 
     <div class="container">
         <header class="page-header">
@@ -22,16 +20,8 @@
             <p class="muted">패널티: <b id="penaltyInfo">0 / 5</b></p>
 
             <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
-                <button id="resetMatchScoreBtn"
-                        class="btn outline"
-                        style="width:auto; display:none;">
-                    매칭 스코어 초기화
-                </button>
-                <button id="resetPenaltyBtn"
-                        class="btn outline"
-                        style="width:auto; display:none;">
-                    패널티 초기화
-                </button>
+                <button id="resetMatchScoreBtn" class="btn outline" style="width:auto; display:none;">매칭 스코어 초기화</button>
+                <button id="resetPenaltyBtn" class="btn outline" style="width:auto; display:none;">패널티 초기화</button>
             </div>
 
             <label class="label">닉네임</label>
@@ -78,7 +68,6 @@
 
     <script type="module">
         const $ = (id) => document.getElementById(id);
-
         const year = $('year');
         const age = $('age');
         const gender = $('gender');
@@ -94,9 +83,6 @@
         const resetPenaltyBtn = $('resetPenaltyBtn');
         const resetMatchScoreBtn = $('resetMatchScoreBtn');
 
-        const fbReady = window.fbReady || Promise.resolve(window.fb);
-
-        // 현재 불러온 프로필 데이터를 기억해두었다가 초기화 시 같이 넘겨줄 용도
         let currentProfile = null;
         let isAdmin = false;
 
@@ -104,61 +90,45 @@
             statusEl.textContent = msg || '';
             statusEl.className = 'status ' + (ok ? 'ok' : 'err');
         }
-
         function renderStars(n) {
             const max = 3;
             const cnt = Math.max(0, Math.min(max, Number(n) || 0));
-            let s = '';
-            for (let i = 0; i < max; i++) {
-                s += i < cnt ? '★' : '☆';
-            }
-            return s;
+            let s = ''; for (let i = 0; i < max; i++) s += i < cnt ? '★' : '☆'; return s;
         }
 
-        mbti.addEventListener('input', () => {
-            let v = (mbti.value || '').toUpperCase().replace(/[^A-Z]/g, '');
-            if (v.length > 4) v = v.slice(0, 4);
-            mbti.value = v;
-        });
-        mbti.addEventListener('paste', (e) => {
-            e.preventDefault();
-            const text = (e.clipboardData.getData('text') || '')
-                .toUpperCase().replace(/[^A-Z]/g, '').slice(0, 4);
-            document.execCommand('insertText', false, text);
-        });
+        mbti.addEventListener('input', () => { mbti.value = (mbti.value || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 4); });
 
         async function boot() {
-            const fb = await fbReady;
+            if (window.fbReady) await window.fbReady;
+            const fb = window.fb;
+            const auth = fb.auth;
+            
+            await auth.authStateReady();
+            const u = auth.currentUser;
 
-            // ✅ [수정됨] 로그인 강제 확인 및 3초 뒤 자동 로그인 방지
-            // requireAuth가 익명 계정을 생성해서 반환하더라도, isAnonymous가 true면 쫓아냅니다.
-            const u = await fb.requireAuth();
+            // 🔒 비로그인 차단
             if (!u || u.isAnonymous) {
+                await new Promise(r => setTimeout(r, 100));
                 alert("로그인이 필요합니다.");
                 location.href = "login.html";
-                return; // 이후 로직 실행 중단
+                return;
             }
 
-            // 로그인 이메일 + 관리자 여부 판단
+            // --- 로그인된 사용자 실행 ---
             try {
                 const savedEmail = sessionStorage.getItem('lastEmail');
                 const email = u?.email || savedEmail || '(익명)';
                 loginEmail.textContent = email;
-
                 isAdmin = fb.isAdminEmail?.(email) === true;
                 if (isAdmin) {
                     resetPenaltyBtn.style.display = 'inline-flex';
                     resetMatchScoreBtn.style.display = 'inline-flex';
                 }
-            } catch {
-                loginEmail.textContent = '(익명)';
-            }
+            } catch { loginEmail.textContent = '(익명)'; }
 
-            // 프로필 불러오기
             try {
                 const data = await fb.loadProfile().catch(() => null);
                 currentProfile = data;
-
                 if (data) {
                     if (data.nickname) nickname.value = data.nickname;
                     if (data.year != null) year.value = data.year;
@@ -168,119 +138,57 @@
                     if (data.mbti) mbti.value = (data.mbti || "").toUpperCase();
                     if (data.content) content.value = data.content;
                     if (typeof data.freeText === 'string') freeText.value = data.freeText;
-
                     const n = Number(data.penaltyScore || 0);
                     penaltyInfo.textContent = `${n} / 5`;
-
                     const mc = Number(data.matchCount || 0);
                     const ms = Number(data.matchStars || 0);
-                    if (matchScore) {
-                        const starsText = renderStars(ms);
-                        matchScore.textContent = `${starsText} (${mc}회)`;
-                    }
-                } else {
-                    if (matchScore) {
-                        matchScore.textContent = `${renderStars(0)} (0회)`;
-                    }
-                }
+                    if (matchScore) matchScore.textContent = `${renderStars(ms)} (${mc}회)`;
+                } else if (matchScore) { matchScore.textContent = `${renderStars(0)} (0회)`; }
             } catch (e) {
                 setStatus("프로필을 불러오지 못했어요.", false);
-                if (matchScore) {
-                    matchScore.textContent = `${renderStars(0)} (0회)`;
-                }
+                if (matchScore) matchScore.textContent = `${renderStars(0)} (0회)`;
             }
 
-            // ✅ 패널티 초기화 버튼 동작
+            // Events
             resetPenaltyBtn?.addEventListener('click', async () => {
-                if (!isAdmin) {
-                    setStatus('패널티 초기화 권한이 없습니다.', false);
-                    return;
-                }
+                if (!isAdmin) return;
                 try {
                     setStatus('');
-                    const base = currentProfile || {};
-                    await fb.saveProfile({
-                        ...base,
-                        penaltyScore: 0,
-                        penaltyUntil: null
-                    });
-                    penaltyInfo.textContent = '0 / 5';
-                    setStatus('패널티가 초기화되었습니다.', true);
-                    currentProfile = {
-                        ...base,
-                        penaltyScore: 0,
-                        penaltyUntil: null
-                    };
-                } catch (e) {
-                    setStatus('패널티 초기화 실패: ' + (e.message || e), false);
-                }
+                    await fb.saveProfile({ ...currentProfile, penaltyScore: 0, penaltyUntil: null });
+                    penaltyInfo.textContent = '0 / 5'; setStatus('패널티가 초기화되었습니다.', true);
+                    currentProfile.penaltyScore = 0;
+                } catch (e) { setStatus('패널티 초기화 실패: ' + e.message, false); }
             });
 
-            // ✅ 매칭 스코어 초기화 버튼 동작
             resetMatchScoreBtn?.addEventListener('click', async () => {
-                if (!isAdmin) {
-                    setStatus('매칭 스코어 초기화 권한이 없습니다.', false);
-                    return;
-                }
+                if (!isAdmin) return;
                 try {
                     setStatus('');
                     await fb.resetMatchScore();
-                    if (matchScore) {
-                        matchScore.textContent = `${renderStars(0)} (0회)`;
-                    }
-                    currentProfile = {
-                        ...(currentProfile || {}),
-                        matchCount: 0,
-                        matchStars: 0
-                    };
+                    if (matchScore) matchScore.textContent = `${renderStars(0)} (0회)`;
                     setStatus('매칭 스코어가 초기화되었습니다.', true);
-                } catch (e) {
-                    setStatus('매칭 스코어 초기화 실패: ' + (e.message || e), false);
-                }
+                } catch (e) { setStatus('매칭 스코어 초기화 실패: ' + e.message, false); }
             });
 
-            // ✅ 프로필 저장 버튼 동작 (닉네임 중복 체크 포함)
             $('saveBtn').addEventListener('click', async () => {
                 setStatus('');
-
-                const fb = await fbReady;
                 const newNick = (nickname.value || '').trim();
                 const prevNick = (currentProfile?.nickname || '').trim();
-
-                // 닉네임이 있고, 이전 값과 다를 때만 중복 체크
                 if (newNick && newNick !== prevNick) {
-                    try {
-                        const ok = await fb.checkNicknameAvailable?.(newNick);
-                        if (!ok) {
-                            setStatus('이미 사용 중인 닉네임입니다.', false);
-                            return;
-                        }
-                    } catch (e) {
-                        setStatus('닉네임 중복 확인 실패: ' + (e.message || e), false);
-                        return;
-                    }
+                    try { if (!await fb.checkNicknameAvailable?.(newNick)) { setStatus('이미 사용 중인 닉네임입니다.', false); return; } }
+                    catch (e) { setStatus('중복 확인 실패: ' + e.message, false); return; }
                 }
-
                 const payload = {
-                    nickname: newNick || null,
-                    year: year.value ? Number(year.value) : null,
-                    age: age.value ? Number(age.value) : null,
-                    gender: gender.value || null,
-                    major: major.value || null,
-                    mbti: (mbti.value || "").toUpperCase() || null,
-                    content: content.value || null,
-                    freeText: freeText.value || ''
+                    nickname: newNick || null, year: year.value ? Number(year.value) : null,
+                    age: age.value ? Number(age.value) : null, gender: gender.value || null,
+                    major: major.value || null, mbti: (mbti.value || "").toUpperCase() || null,
+                    content: content.value || null, freeText: freeText.value || ''
                 };
                 try {
                     await fb.saveProfile(payload);
                     setStatus('프로필 저장 완료!', true);
-                    currentProfile = {
-                        ...(currentProfile || {}),
-                        ...payload
-                    };
-                } catch (e) {
-                    setStatus('저장 실패: ' + (e.message || e), false);
-                }
+                    currentProfile = { ...(currentProfile || {}), ...payload };
+                } catch (e) { setStatus('저장 실패: ' + e.message, false); }
             });
 
             $('logoutFab').addEventListener('click', async () => {
