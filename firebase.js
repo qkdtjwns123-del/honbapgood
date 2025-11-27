@@ -44,11 +44,10 @@ const my = {
         return auth?.currentUser?.uid || null;
     },
 
-    // ✅ [수정됨] 자동 익명 로그인 로직 제거
-    // 이제 로그인 상태가 확정될 때까지만 기다리고, 없으면 그냥 null을 반환합니다.
+    // 자동 로그인 방지를 위해 상태 확인만 수행 (익명 로그인 생성 X)
     async requireAuth() {
-        await auth.authStateReady(); // 인증 상태 초기화 대기
-        return auth.currentUser;     // 유저가 있으면 유저 객체, 없으면 null 반환
+        await auth.authStateReady();
+        return auth.currentUser;
     },
 
     async logout() {
@@ -57,9 +56,7 @@ const my = {
 
     async nowProfile() {
         await my.requireAuth();
-        // 로그인 안되어 있으면 프로필 조회 불가
         if (!my.uid) return null;
-        
         const snap = await getDoc(doc(db, "profiles", my.uid));
         return snap.exists() ? snap.data() : null;
     },
@@ -81,17 +78,12 @@ const my = {
             freeText: (p.freeText ?? "").trim(),
             isBot: !!p.isBot,
 
-            // 패널티/이용 제한
             penaltyScore: p.penaltyScore ?? 0,
             penaltyUntil: p.penaltyUntil ?? null,
-
-            // 매칭 온도 (있던 값 유지)
             honbapTemp: p.honbapTemp ?? 50,
-
             updatedAt: serverTimestamp(),
         };
 
-        // ✅ 닉네임 중복 체크
         if (payload.nickname) {
             const ok = await checkNicknameAvailable(payload.nickname);
             if (!ok) {
@@ -131,35 +123,48 @@ const _actionCodeSettings = () => {
     return { url, handleCodeInApp: true };
 };
 
+// ✅ [수정됨] 중복 가입 방지 로직 강화
 async function sendEmailLink(email) {
     const e = (email || "").trim();
     _assertKwEmail(e);
 
-    // 1. Auth 중복 체크
-    let methods = [];
-    try {
-        methods = await fetchSignInMethodsForEmail(auth, e);
-    } catch (err) {
-        console.warn("Auth check failed:", err);
-    }
-    if (methods && methods.length > 0) {
-        throw new Error("이미 가입된 메일입니다.");
+    // 0. 중복 확인을 위한 권한 확보 (임시 익명 로그인)
+    // 로그아웃 상태에서는 DB 조회가 불가능하므로, 잠시 로그인했다가 체크 후 바로 로그아웃합니다.
+    let isTempLogin = false;
+    if (!auth.currentUser) {
+        try {
+            await signInAnonymously(auth);
+            isTempLogin = true;
+        } catch (err) {
+            console.warn("중복 체크를 위한 임시 로그인 실패:", err);
+        }
     }
 
-    // 2. Firestore 프로필 중복 체크
-    // (이 부분은 requireAuth가 null을 리턴하면 동작하지 않을 수 있으므로, 
-    //  익명 로그인이 필요한 유일한 예외 상황이나, 회원가입 시점엔 보통 로그아웃 상태임.
-    //  보안 규칙상 읽기가 허용되어야 체크 가능)
     try {
+        // 1. Auth 계정 존재 여부 (보안 설정에 따라 무시될 수 있음)
+        let methods = [];
+        try { methods = await fetchSignInMethodsForEmail(auth, e); } catch { }
+        if (methods && methods.length > 0) {
+            throw new Error("이미 가입된 메일입니다.");
+        }
+
+        // 2. Firestore 프로필 존재 여부 (확실한 체크)
+        // 임시 로그인 덕분에 이제 DB 읽기 권한이 생겨서 조회가 가능합니다.
         const q = query(collection(db, "profiles"), where("email", "==", e), limit(1));
         const ss = await getDocs(q);
         if (!ss.empty) {
             throw new Error("이미 가입된 메일입니다.");
         }
-    } catch (err) {
-        // 권한 문제로 읽지 못하는 경우(아직 계정 없음)는 통과
+
+    } finally {
+        // 3. 흔적 지우기: 임시 로그인했었다면 즉시 로그아웃
+        // 이렇게 해야 사용자가 홈 화면 등에서 '자동 로그인' 상태로 남지 않습니다.
+        if (isTempLogin) {
+            await signOut(auth);
+        }
     }
 
+    // 4. 문제 없으면 이메일 발송
     await sendSignInLinkToEmail(auth, e, _actionCodeSettings());
     try { localStorage.setItem("signup_email", e); } catch { }
     return true;
@@ -189,25 +194,20 @@ async function setPasswordForCurrentUser(pw) {
 // ────────────────────── 닉네임 중복 체크 ──────────────────────
 async function checkNicknameAvailable(nickname) {
     await my.requireAuth();
-    if (!my.uid) return true; // 로그인 안했으면 체크 패스(어차피 저장 불가)
+    if (!my.uid) return true;
 
     const nick = (nickname || "").trim();
     if (!nick) return true;
 
-    const qy = query(
-        collection(db, "profiles"),
-        where("nickname", "==", nick),
-        limit(5)
-    );
+    const qy = query(collection(db, "profiles"), where("nickname", "==", nick), limit(5));
     const ss = await getDocs(qy);
     if (ss.empty) return true;
 
     const me = my.uid;
-    const someoneElse = ss.docs.some(d => d.id !== me);
-    return !someoneElse;
+    return !ss.docs.some(d => d.id !== me);
 }
 
-// ────────────────────── 커뮤니티: 게시글/댓글/좋아요 ──────────────────────
+// ────────────────────── 커뮤니티 ──────────────────────
 async function createPost({ title, body, anonymous = false }) {
     await my.requireAuth();
     const u = auth.currentUser;
@@ -249,36 +249,27 @@ async function listPosts({ take = 30 } = {}) {
 async function updatePost(postId, { title, body }) {
     await my.requireAuth();
     if (!postId) throw new Error("postId가 필요합니다.");
-
     const ref = doc(db, "posts", postId);
     const s = await getDoc(ref);
     if (!s.exists()) throw new Error("post not found");
-
     const p = s.data();
-    if (!(isAdmin() || p.authorUid === my.uid)) {
-        throw new Error("권한이 없습니다.");
-    }
-
+    if (!(isAdmin() || p.authorUid === my.uid)) throw new Error("권한이 없습니다.");
+    
     const patch = {};
     if (typeof title === "string") patch.title = title;
     if (typeof body === "string") patch.body = body;
     patch.updatedAt = serverTimestamp();
-
     await updateDoc(ref, patch);
 }
 
 async function deletePost(postId) {
     await my.requireAuth();
     if (!postId) throw new Error("postId가 필요합니다.");
-
     const ref = doc(db, "posts", postId);
     const s = await getDoc(ref);
     if (!s.exists()) return;
-
     const p = s.data();
-    if (!(isAdmin() || p.authorUid === my.uid)) {
-        throw new Error("권한이 없습니다.");
-    }
+    if (!(isAdmin() || p.authorUid === my.uid)) throw new Error("권한이 없습니다.");
     await deleteDoc(ref);
 }
 
@@ -291,15 +282,11 @@ async function togglePostLike(postId) {
     if (!postId) throw new Error("postId가 필요합니다.");
     await my.requireAuth();
     if (!my.uid) throw new Error("로그인이 필요합니다.");
-
     const uid = my.uid;
     const ref = doc(db, "posts", postId, "likes", uid);
     const s = await getDoc(ref);
-    if (s.exists()) {
-        await deleteDoc(ref);
-    } else {
-        await setDoc(ref, { uid, createdAt: serverTimestamp() });
-    }
+    if (s.exists()) await deleteDoc(ref);
+    else await setDoc(ref, { uid, createdAt: serverTimestamp() });
 }
 
 async function listComments(postId, { take = 50 } = {}) {
@@ -313,9 +300,7 @@ async function listComments(postId, { take = 50 } = {}) {
         );
         const ss = await getDocs(qy);
         return ss.docs.map(d => ({ id: d.id, ...d.data() }));
-    } catch {
-        return [];
-    }
+    } catch { return []; }
 }
 
 async function addComment(postId, { text, anonymous = false }) {
@@ -347,19 +332,14 @@ async function addComment(postId, { text, anonymous = false }) {
 async function deleteComment(postId, commentId) {
     if (!postId || !commentId) throw new Error("postId/commentId가 필요합니다.");
     await my.requireAuth();
-
     const ref = doc(db, "posts", postId, "comments", commentId);
     const s = await getDoc(ref);
     if (!s.exists()) return;
-
     const c = s.data();
     const me = my.uid;
     const myEmail = (auth.currentUser?.email || "").toLowerCase();
     const isOwner = (c.authorUid === me) || ((c.authorEmail || "").toLowerCase() === myEmail);
-
-    if (!(isAdmin() || isOwner)) {
-        throw new Error("권한이 없습니다.");
-    }
+    if (!(isAdmin() || isOwner)) throw new Error("권한이 없습니다.");
     await deleteDoc(ref);
 }
 
@@ -373,29 +353,20 @@ async function toggleCommentLike(postId, commentId) {
     if (!postId || !commentId) throw new Error("postId/commentId가 필요합니다.");
     await my.requireAuth();
     if (!my.uid) throw new Error("로그인이 필요합니다.");
-
     const uid = my.uid;
     const ref = doc(db, "posts", postId, "comments", commentId, "likes", uid);
     const s = await getDoc(ref);
-    if (s.exists()) {
-        await deleteDoc(ref);
-    } else {
-        await setDoc(ref, { uid, createdAt: serverTimestamp() });
-    }
+    if (s.exists()) await deleteDoc(ref);
+    else await setDoc(ref, { uid, createdAt: serverTimestamp() });
 }
 
-// ────────────────────── 패널티 / 이용 제한 ──────────────────────
+// ────────────────────── 기타 기능 ──────────────────────
 async function _checkBanOrThrow() {
     await my.requireAuth();
     if (!my.uid) throw new Error("로그인이 필요합니다.");
-
     const s = await getDoc(doc(db, "profiles", my.uid));
     const p = s.exists() ? s.data() : {};
-
-    const until = p?.penaltyUntil?.toDate?.()
-        ? p.penaltyUntil.toDate()
-        : (p?.penaltyUntil || null);
-
+    const until = p?.penaltyUntil?.toDate?.() ? p.penaltyUntil.toDate() : (p?.penaltyUntil || null);
     if (until && until.getTime() > Date.now()) {
         const mins = Math.max(1, Math.ceil((until.getTime() - Date.now()) / 60000));
         throw new Error(`패널티 5회 누적으로 1시간 동안 이용이 제한됩니다. 남은 시간: 약 ${mins}분 후 다시 시도하세요.`);
@@ -405,62 +376,41 @@ async function _checkBanOrThrow() {
 async function applyPenalty() {
     await my.requireAuth();
     if (!my.uid) return;
-
     const ref = doc(db, "profiles", my.uid);
     const BAN_AFTER = 5;
     const BAN_MS = 60 * 60 * 1000;
-
     await runTransaction(db, async tx => {
         const s = await tx.get(ref);
         const p = s.exists() ? s.data() : {};
         const cur = Number(p.penaltyScore || 0);
         const next = cur + 1;
-
         if (next >= BAN_AFTER) {
             const until = new Date(Date.now() + BAN_MS);
-            tx.set(ref, {
-                penaltyScore: 0,
-                penaltyUntil: until,
-                updatedAt: serverTimestamp()
-            }, { merge: true });
+            tx.set(ref, { penaltyScore: 0, penaltyUntil: until, updatedAt: serverTimestamp() }, { merge: true });
         } else {
-            tx.set(ref, {
-                penaltyScore: next,
-                updatedAt: serverTimestamp()
-            }, { merge: true });
+            tx.set(ref, { penaltyScore: next, updatedAt: serverTimestamp() }, { merge: true });
         }
     });
 }
 
-// ────────────────────── 매칭 스코어(별) ──────────────────────
 async function addMatchSuccess() {
     await my.requireAuth();
     if (!my.uid) return;
-
     const ref = doc(db, "profiles", my.uid);
     let result = { matchCount: 0, matchStars: 0, rewarded: false };
-
     await runTransaction(db, async tx => {
         const s = await tx.get(ref);
         const p = s.exists() ? s.data() : {};
         const curCount = Number(p.matchCount || 0);
         const curStarsRaw = Number(p.matchStars || 0);
         const curStars = Number.isFinite(curStarsRaw) && curStarsRaw > 0 ? curStarsRaw : 0;
-
         const nextCount = curCount + 1;
         const maxStars = 3;
         const nextStars = Math.min(maxStars, Math.floor(nextCount / 3));
         const rewarded = (nextStars >= maxStars && curStars < maxStars);
-
-        tx.set(ref, {
-            matchCount: nextCount,
-            matchStars: nextStars,
-            updatedAt: serverTimestamp()
-        }, { merge: true });
-
+        tx.set(ref, { matchCount: nextCount, matchStars: nextStars, updatedAt: serverTimestamp() }, { merge: true });
         result = { matchCount: nextCount, matchStars: nextStars, rewarded };
     });
-
     return result;
 }
 
@@ -468,14 +418,10 @@ async function resetMatchScore() {
     await my.requireAuth();
     if (!my.uid) return;
     const ref = doc(db, "profiles", my.uid);
-    await setDoc(ref, {
-        matchCount: 0,
-        matchStars: 0,
-        updatedAt: serverTimestamp()
-    }, { merge: true });
+    await setDoc(ref, { matchCount: 0, matchStars: 0, updatedAt: serverTimestamp() }, { merge: true });
 }
 
-// ────────────────────── 매칭 / 방 생성 ──────────────────────
+// ────────────────────── 매칭 로직 ──────────────────────
 const MATCH_TIMEOUT_MS = 45000;
 const ONLINE_WINDOW_MS = 90000;
 
@@ -488,9 +434,7 @@ async function leaveQueueByUid(uid) {
 async function enterQueue(options) {
     await my.requireAuth();
     if (!my.uid) throw new Error("로그인이 필요합니다.");
-
     const prof = await my.nowProfile() || {};
-
     const ref = doc(collection(db, "matchQueue"));
     await setDoc(ref, {
         uid: my.uid,
@@ -499,17 +443,12 @@ async function enterQueue(options) {
         lastActive: serverTimestamp(),
         status: "waiting",
         pref: {
-            year: prof.year ?? null,
-            age: prof.age ?? null,
-            gender: prof.gender ?? null,
-            major: prof.major ?? null,
-            freeText: prof.freeText ?? "",
-            ...options
+            year: prof.year ?? null, age: prof.age ?? null, gender: prof.gender ?? null,
+            major: prof.major ?? null, freeText: prof.freeText ?? "", ...options
         },
         isBot: !!prof.isBot,
         roomId: null,
     });
-
     return ref.id;
 }
 
@@ -518,16 +457,9 @@ async function findOpponent(myDocId) {
     const md = await getDoc(myRef);
     if (!md.exists()) throw new Error("대기열 문서가 없어요.");
     const me = md.data();
-
-    const qy = query(
-        collection(db, "matchQueue"),
-        where("status", "==", "waiting"),
-        orderBy("createdAt", "asc"),
-        limit(25)
-    );
+    const qy = query(collection(db, "matchQueue"), where("status", "==", "waiting"), orderBy("createdAt", "asc"), limit(25));
     const snaps = await getDocs(qy);
     const now = Date.now();
-
     const freeOverlapCheck = (_A, other) => {
         if (!me.pref?.freeOverlap) return true;
         const clean = s => (s || "").replace(/\s/g, "");
@@ -537,27 +469,21 @@ async function findOpponent(myDocId) {
         const days = ["월", "화", "수", "목", "금", "토", "일"];
         return days.some(ch => a.includes(ch) && b.includes(ch));
     };
-
     for (const d of snaps.docs) {
         if (d.id === myDocId) continue;
         const you = d.data();
         if (you.uid === me.uid) continue;
         if (you.status !== "waiting") continue;
-
         if (me.pref?.onlineOnly) {
             const last = (you.lastActive?.toDate?.() || new Date(0)).getTime();
             if (now - last > ONLINE_WINDOW_MS) continue;
         }
-
         const same = (a, b) => (a != null && b != null && a === b);
-
         if (me.pref?.yearSame && !same(me.pref?.year, you.pref?.year)) continue;
         if (me.pref?.majorSame && !same(me.pref?.major, you.pref?.major)) continue;
         if (me.pref?.ageSame && !same(me.pref?.age, you.pref?.age)) continue;
         if (me.pref?.genderSame && !same(me.pref?.gender, you.pref?.gender)) continue;
-
         if (!freeOverlapCheck(me.pref?.freeText, you)) continue;
-
         return { id: d.id, you };
     }
     return null;
@@ -572,24 +498,10 @@ async function createRoomAndInvite(myDocId, oppDocId, oppUid) {
         acceptVoted: [],
         acceptYes: [],
         declinedBy: null,
-        invites: {
-            to: oppDocId,
-            at: serverTimestamp(),
-            accepted: null,
-        },
+        invites: { to: oppDocId, at: serverTimestamp(), accepted: null },
     });
-
-    await updateDoc(doc(db, "matchQueue", myDocId), {
-        status: "matched",
-        roomId: roomRef.id,
-        lastActive: serverTimestamp()
-    });
-    await updateDoc(doc(db, "matchQueue", oppDocId), {
-        status: "matched",
-        roomId: roomRef.id,
-        lastActive: serverTimestamp()
-    });
-
+    await updateDoc(doc(db, "matchQueue", myDocId), { status: "matched", roomId: roomRef.id, lastActive: serverTimestamp() });
+    await updateDoc(doc(db, "matchQueue", oppDocId), { status: "matched", roomId: roomRef.id, lastActive: serverTimestamp() });
     return roomRef;
 }
 
@@ -597,78 +509,41 @@ async function myAcceptOrDecline(roomId, accept) {
     await my.requireAuth();
     if (!my.uid) throw new Error("로그인이 필요합니다.");
     const ref = doc(db, "rooms", roomId);
-
     await runTransaction(db, async tx => {
         const s = await tx.get(ref);
         if (!s.exists()) throw new Error("room not found");
         const r = s.data();
-
         if (r.phase !== "pendingAccept") return;
-
         const voted = new Set(r.acceptVoted || []);
         const yesSet = new Set(r.acceptYes || []);
         const me = my.uid;
-
         voted.add(me);
-        if (accept) {
-            yesSet.add(me);
-        } else {
-            tx.update(ref, {
-                phase: "declined",
-                declinedBy: me,
-                acceptVoted: Array.from(voted),
-                acceptYes: Array.from(yesSet),
-                updatedAt: serverTimestamp(),
-            });
+        if (accept) yesSet.add(me);
+        else {
+            tx.update(ref, { phase: "declined", declinedBy: me, acceptVoted: Array.from(voted), acceptYes: Array.from(yesSet), updatedAt: serverTimestamp() });
             return;
         }
-
         const members = new Set(r.members || []);
         const everyoneVoted = Array.from(members).every(u => voted.has(u));
         const everyoneYes = everyoneVoted && Array.from(members).every(u => yesSet.has(u));
-
-        const patch = {
-            acceptVoted: Array.from(voted),
-            acceptYes: Array.from(yesSet),
-            updatedAt: serverTimestamp(),
-        };
-
+        const patch = { acceptVoted: Array.from(voted), acceptYes: Array.from(yesSet), updatedAt: serverTimestamp() };
         if (everyoneVoted) {
-            if (everyoneYes) {
-                patch.phase = "accepted";
-            } else {
-                patch.phase = "declined";
-                if (!r.declinedBy) patch.declinedBy = me;
-            }
+            if (everyoneYes) patch.phase = "accepted";
+            else { patch.phase = "declined"; if (!r.declinedBy) patch.declinedBy = me; }
         }
-
         tx.update(ref, patch);
     });
 }
 
 async function waitInviteDecision(roomId, timeoutSec = 30) {
     const ref = doc(db, "rooms", roomId);
-
     return new Promise(resolve => {
-        const t = setTimeout(() => {
-            un();
-            resolve({ accepted: false, declinedBy: null });
-        }, timeoutSec * 1000);
-
+        const t = setTimeout(() => { un(); resolve({ accepted: false, declinedBy: null }); }, timeoutSec * 1000);
         const un = onSnapshot(ref, snap => {
             if (!snap.exists()) return;
             const r = snap.data();
-
-            if (r.phase === "accepted") {
-                clearTimeout(t);
-                un();
-                resolve({ accepted: true, declinedBy: null });
-            }
-            if (r.phase === "declined") {
-                clearTimeout(t);
-                un();
-                resolve({ accepted: false, declinedBy: r.declinedBy || null });
-            }
+            if (r.phase === "accepted") { clearTimeout(t); un(); resolve({ accepted: true, declinedBy: null }); }
+            if (r.phase === "declined") { clearTimeout(t); un(); resolve({ accepted: false, declinedBy: r.declinedBy || null }); }
         });
     });
 }
@@ -677,264 +552,143 @@ async function myStartYesOrNo(roomId, yes) {
     await my.requireAuth();
     if (!my.uid) throw new Error("로그인이 필요합니다.");
     const ref = doc(db, "rooms", roomId);
-
     await runTransaction(db, async tx => {
         const s = await tx.get(ref);
         if (!s.exists()) throw new Error("room not found");
         const r = s.data();
         if (r.phase !== "startCheck") return;
-
         if (!yes) {
-            tx.update(ref, {
-                startVoted: Array.from(new Set([...(r.startVoted || []), my.uid])),
-                startYes: Array.from(new Set([...(r.startYes || [])])),
-                startDeclinedBy: my.uid,
-                phase: "startDeclined",
-                updatedAt: serverTimestamp(),
-            });
+            tx.update(ref, { startVoted: Array.from(new Set([...(r.startVoted || []), my.uid])), startYes: Array.from(new Set([...(r.startYes || [])])), startDeclinedBy: my.uid, phase: "startDeclined", updatedAt: serverTimestamp() });
             return;
         }
-
         const voted = new Set(r.startVoted || []);
         const yesSet = new Set(r.startYes || []);
-        voted.add(my.uid);
-        yesSet.add(my.uid);
-
+        voted.add(my.uid); yesSet.add(my.uid);
         const all = new Set(r.members || []);
         const everyoneVoted = Array.from(all).every(u => voted.has(u));
         const everyoneYes = everyoneVoted && Array.from(all).every(u => yesSet.has(u));
-
-        const patch = {
-            startVoted: Array.from(voted),
-            startYes: Array.from(yesSet),
-            updatedAt: serverTimestamp(),
-        };
-
+        const patch = { startVoted: Array.from(voted), startYes: Array.from(yesSet), updatedAt: serverTimestamp() };
         if (everyoneVoted) {
             patch.phase = everyoneYes ? "chatting" : "startDeclined";
-            if (!everyoneYes && !r.startDeclinedBy) {
-                patch.startDeclinedBy = my.uid;
-            }
+            if (!everyoneYes && !r.startDeclinedBy) patch.startDeclinedBy = my.uid;
         }
-
         tx.update(ref, patch);
     });
 }
 
 async function waitStartDecision(roomId, timeoutSec = 30) {
     const ref = doc(db, "rooms", roomId);
-
     return new Promise(resolve => {
-        const t = setTimeout(() => {
-            un();
-            resolve({ go: false, declinedBy: null });
-        }, timeoutSec * 1000);
-
+        const t = setTimeout(() => { un(); resolve({ go: false, declinedBy: null }); }, timeoutSec * 1000);
         const un = onSnapshot(ref, snap => {
             if (!snap.exists()) return;
             const r = snap.data();
-
-            if (r.phase === "chatting") {
-                clearTimeout(t);
-                un();
-                resolve({ go: true, declinedBy: null });
-            }
-            if (r.phase === "startDeclined") {
-                clearTimeout(t);
-                un();
-                resolve({ go: false, declinedBy: r.startDeclinedBy || null });
-            }
+            if (r.phase === "chatting") { clearTimeout(t); un(); resolve({ go: true, declinedBy: null }); }
+            if (r.phase === "startDeclined") { clearTimeout(t); un(); resolve({ go: false, declinedBy: r.startDeclinedBy || null }); }
         });
     });
 }
 
-function gotoRoom(roomId) {
-    location.href = `chat.html?room=${encodeURIComponent(roomId)}`;
-}
+function gotoRoom(roomId) { location.href = `chat.html?room=${encodeURIComponent(roomId)}`; }
 
-async function cancelMatching() {
-    if (!auth.currentUser) return;
-    await leaveQueueByUid(my.uid);
-}
-
+async function cancelMatching() { if (!auth.currentUser) return; await leaveQueueByUid(my.uid); }
 async function markLeaving() {
     if (!auth.currentUser) return;
     const qy = query(collection(db, "matchQueue"), where("uid", "==", my.uid), limit(1));
     const ss = await getDocs(qy);
     if (ss.empty) return;
-    await updateDoc(ss.docs[0].ref, {
-        status: "leaving",
-        lastActive: serverTimestamp()
-    });
+    await updateDoc(ss.docs[0].ref, { status: "leaving", lastActive: serverTimestamp() });
 }
-
 async function assertRoomMember(roomId) {
     await my.requireAuth();
     if (!my.uid) throw new Error("로그인이 필요합니다.");
     const s = await getDoc(doc(db, "rooms", roomId));
     if (!s.exists()) throw new Error("room not found");
     const r = s.data();
-    if (!Array.isArray(r.members) || !r.members.includes(my.uid)) {
-        throw new Error("you are not a member of this room");
-    }
+    if (!Array.isArray(r.members) || !r.members.includes(my.uid)) throw new Error("you are not a member of this room");
     return true;
 }
-
 function onMessages(roomId, cb) {
-    const qy = query(
-        collection(db, "rooms", roomId, "messages"),
-        orderBy("createdAt", "asc"),
-        limit(200)
-    );
-    return onSnapshot(qy, ss =>
-        cb(ss.docs.map(d => ({ id: d.id, ...d.data() })))
-    );
+    const qy = query(collection(db, "rooms", roomId, "messages"), orderBy("createdAt", "asc"), limit(200));
+    return onSnapshot(qy, ss => cb(ss.docs.map(d => ({ id: d.id, ...d.data() }))));
 }
-
 async function sendMessage(roomId, text) {
     await my.requireAuth();
     if (!my.uid) return;
     const t = (text || "").trim();
     if (!t) return;
-
     let display = "익명";
     try {
         const prof = await my.nowProfile().catch(() => null);
         const nick = (prof?.nickname || "").trim();
         if (nick) display = nick;
-        else if (auth.currentUser?.email) {
-            display = (auth.currentUser.email.split("@")[0] || "익명");
-        }
+        else if (auth.currentUser?.email) display = (auth.currentUser.email.split("@")[0] || "익명");
     } catch { }
-
-    await addDoc(collection(db, "rooms", roomId, "messages"), {
-        text: t,
-        uid: my.uid,
-        email: auth.currentUser?.email ?? null,
-        display,
-        createdAt: serverTimestamp()
-    });
+    await addDoc(collection(db, "rooms", roomId, "messages"), { text: t, uid: my.uid, email: auth.currentUser?.email ?? null, display, createdAt: serverTimestamp() });
 }
-
 async function leaveRoom(roomId) {
     await my.requireAuth();
     if (!my.uid) return;
     const ref = doc(db, "rooms", roomId);
     let leftTo = 0;
-
     await runTransaction(db, async tx => {
         const s = await tx.get(ref);
         if (!s.exists()) return;
         const r = s.data();
         const members = (r.members || []).filter(u => u !== my.uid);
         leftTo = members.length;
-
         const patch = { members, updatedAt: serverTimestamp() };
         if (members.length === 0) patch.phase = "ended";
         tx.update(ref, patch);
     });
-
     await leaveQueueByUid(my.uid);
-
-    if (leftTo > 0) {
-        await addDoc(collection(db, "rooms", roomId, "messages"), {
-            text: "상대방이 채팅방을 나갔습니다.",
-            system: true,
-            createdAt: serverTimestamp()
-        });
-    }
+    if (leftTo > 0) await addDoc(collection(db, "rooms", roomId, "messages"), { text: "상대방이 채팅방을 나갔습니다.", system: true, createdAt: serverTimestamp() });
 }
 
 const api = {
-    auth,
-    db,
-    requireAuth: my.requireAuth,
-    logout: my.logout,
-    loginWithEmailPassword,
-    signUpWithEmailPassword,
-    sendEmailLink,
-    handleEmailLinkIfPresent,
-    setPasswordForCurrentUser,
-    loadProfile: my.nowProfile,
-    saveProfile: my.saveProfile,
-    checkNicknameAvailable,
-    createPost,
-    listPosts,
-    updatePost,
-    deletePost,
-    onLikeCount,
-    togglePostLike,
-    listComments,
-    addComment,
-    deleteComment,
-    onCommentLikeCount,
-    toggleCommentLike,
-    startMatching: async (options) => {
-        await my.requireAuth();
-        await _checkBanOrThrow();
-        await leaveQueueByUid(my.uid);
-        const myDocId = await enterQueue(options);
-        const found = await findOpponent(myDocId);
-        if (!found) {
-            const myRef = doc(db, "matchQueue", myDocId);
-            const room = await new Promise((resolve, reject) => {
-                const t = setTimeout(() => {
-                    un();
-                    reject(new Error("제한 시간 내에 상대를 못 찾았어요."));
-                }, MATCH_TIMEOUT_MS);
-                const un = onSnapshot(myRef, snap => {
-                    if (!snap.exists()) return;
-                    const d = snap.data();
-                    if (d.status === "matched" && d.roomId) {
-                        clearTimeout(t);
-                        un();
-                        resolve({ id: d.roomId });
-                    } else {
-                        updateDoc(myRef, { lastActive: serverTimestamp() }).catch(() => { });
-                    }
-                });
-            });
-            return room;
-        }
-        const roomRef = await createRoomAndInvite(myDocId, found.id, found.you.uid);
-        return { id: roomRef.id };
-    },
-    readyToAccept: waitInviteDecision,
-    acceptMatch: (roomId) => myAcceptOrDecline(roomId, true),
-    declineMatch: (roomId) => myAcceptOrDecline(roomId, false),
-    readyToChat: waitStartDecision,
-    startYes: (roomId) => myStartYesOrNo(roomId, true),
-    startNo: (roomId) => myStartYesOrNo(roomId, false),
-    gotoRoom,
-    applyPenalty,
-    cancelMatching,
-    markLeaving,
-    onMessages,
-    sendMessage,
-    assertRoomMember,
-    leaveRoom,
+    auth, db,
+    requireAuth: my.requireAuth, logout: my.logout,
+    loginWithEmailPassword, signUpWithEmailPassword, sendEmailLink, handleEmailLinkIfPresent, setPasswordForCurrentUser,
+    loadProfile: my.nowProfile, saveProfile: my.saveProfile, checkNicknameAvailable,
+    createPost, listPosts, updatePost, deletePost, onLikeCount, togglePostLike, listComments, addComment, deleteComment, onCommentLikeCount, toggleCommentLike,
+    startMatching: apiStartMatching, // 호이스팅 문제 해결 위해 아래 정의 연결
+    readyToAccept: waitInviteDecision, acceptMatch: (roomId) => myAcceptOrDecline(roomId, true), declineMatch: (roomId) => myAcceptOrDecline(roomId, false),
+    readyToChat: waitStartDecision, startYes: (roomId) => myStartYesOrNo(roomId, true), startNo: (roomId) => myStartYesOrNo(roomId, false),
+    gotoRoom, applyPenalty, cancelMatching, markLeaving, onMessages, sendMessage, assertRoomMember, leaveRoom,
     startWithTestBot: async () => {
         await my.requireAuth();
         await leaveQueueByUid(my.uid);
         const roomRef = doc(collection(db, "rooms"));
-        await setDoc(roomRef, {
-            members: [my.uid, "__testbot__"],
-            createdAt: serverTimestamp(),
-            phase: "chatting"
-        });
-        await addDoc(collection(db, "rooms", roomRef.id, "messages"), {
-            text: "테스트봇 연결 완료 ✅ 채팅 입력 테스트 해보세요.",
-            uid: "__testbot__",
-            email: "bot",
-            display: "테스트봇",
-            createdAt: serverTimestamp()
-        });
+        await setDoc(roomRef, { members: [my.uid, "__testbot__"], createdAt: serverTimestamp(), phase: "chatting" });
+        await addDoc(collection(db, "rooms", roomRef.id, "messages"), { text: "테스트봇 연결 완료 ✅ 채팅 입력 테스트 해보세요.", uid: "__testbot__", email: "bot", display: "테스트봇", createdAt: serverTimestamp() });
         return { id: roomRef.id };
     },
-    isAdminEmail,
-    addMatchSuccess,
-    resetMatchScore,
+    isAdminEmail, addMatchSuccess, resetMatchScore,
 };
+
+// api 객체 정의 후 startMatching 연결 (순환 참조 방지)
+async function apiStartMatching(options) {
+    await my.requireAuth();
+    await _checkBanOrThrow();
+    await leaveQueueByUid(my.uid);
+    const myDocId = await enterQueue(options);
+    const found = await findOpponent(myDocId);
+    if (!found) {
+        const myRef = doc(db, "matchQueue", myDocId);
+        return new Promise((resolve, reject) => {
+            const t = setTimeout(() => { un(); reject(new Error("제한 시간 내에 상대를 못 찾았어요.")); }, MATCH_TIMEOUT_MS);
+            const un = onSnapshot(myRef, snap => {
+                if (!snap.exists()) return;
+                const d = snap.data();
+                if (d.status === "matched" && d.roomId) { clearTimeout(t); un(); resolve({ id: d.roomId }); }
+                else updateDoc(myRef, { lastActive: serverTimestamp() }).catch(() => { });
+            });
+        });
+    }
+    const roomRef = await createRoomAndInvite(myDocId, found.id, found.you.uid);
+    return { id: roomRef.id };
+}
+api.startMatching = apiStartMatching;
 
 window.fb = api;
 window.fbReady = Promise.resolve(api);
