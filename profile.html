@@ -106,9 +106,9 @@
             await auth.authStateReady();
             const u = auth.currentUser;
 
-            // 🔒 비로그인 차단
+            // 🔒 비로그인 차단 (대기 시간을 500ms로 늘림)
             if (!u || u.isAnonymous) {
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 500)); // 0.5초 대기
                 alert("로그인이 필요합니다.");
                 location.href = "login.html";
                 return;
